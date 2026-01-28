@@ -265,6 +265,10 @@ CAPABILITIES:
 5. **Memory**: Store and recall facts.
 
 6. **Web/Email/Secrets**: If configured, search web, browse pages, send emails.
+
+7. **Code Execution**: Python code with ANY package can be executed. External packages
+   (pandas, numpy, requests, etc.) are auto-detected and installed in a sandbox.
+   Stdlib-only code runs locally for speed.
 {obj_summary}
 
 Be proactive about using background objectives for complex work."""

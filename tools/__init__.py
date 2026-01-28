@@ -4,22 +4,28 @@ Tools Framework
 Elegant auto-registration of tools using decorators and type hints.
 
 Usage:
-    from tools import tool
+    from tools import tool, register_tool_fn
 
     @tool
     def web_search(query: str, max_results: int = 5) -> dict:
-        '''Search the web.
-
-        Args:
-            query: What to search for
-            max_results: Number of results
-        '''
+        '''Search the web.'''
         return {"results": [...]}
+
+    # Dynamic tool from code string (auto-sandboxed if external packages)
+    result = register_tool_fn("my_tool", '''
+import pandas as pd
+def run(data): return pd.DataFrame(data).describe()
+''')
 
 The @tool decorator:
 - Generates JSON schema from type hints
 - Extracts descriptions from docstrings
 - Auto-registers when the module loads
+
+register_tool_fn:
+- Analyzes imports via AST
+- Routes to sandbox if external packages detected
+- Falls back to local execution for stdlib-only code
 """
 
 import inspect
@@ -195,7 +201,7 @@ def get_all_tools(tool_class):
         tool_class: The Tool class from agent.py
     """
     # Import all tool modules to trigger registration
-    from tools import web, email, secrets
+    from tools import web, email, secrets, sandbox
 
     tools = []
     for info in _registered_tools:
@@ -214,3 +220,73 @@ def init_tools(tool_class):
     """Initialize the tools framework with the Tool class."""
     global _Tool
     _Tool = tool_class
+
+
+def register_tool_fn(name: str, code: str, description: str = None) -> dict:
+    """
+    Register a tool from code string with smart sandbox routing.
+
+    Analyzes imports—if external packages detected, runs in sandbox.
+    Otherwise runs locally for speed.
+
+    Args:
+        name: Tool name
+        code: Python code defining the tool (should have a 'run' function)
+        description: Optional description
+
+    Returns:
+        dict with: sandboxed (bool), packages (list), tool_name (str)
+    """
+    from tools.sandbox import detect_imports, get_sandbox
+
+    external = detect_imports(code)
+
+    if external:
+        # Sandbox execution: wrap in closure that re-executes in sandbox
+        def make_sandboxed_fn(tool_code: str, packages: set):
+            def sandboxed_wrapper(params: dict, agent):
+                sandbox = get_sandbox()
+                # Install packages once
+                for pkg in packages:
+                    try:
+                        sandbox.commands.run(f"pip install -q {pkg}")
+                    except Exception:
+                        pass
+                # Execute with params
+                full_code = f"{tool_code}\nresult = run({params!r})"
+                result = sandbox.run_code(full_code)
+                return result.text if hasattr(result, 'text') else str(result)
+            return sandboxed_wrapper
+
+        wrapper = make_sandboxed_fn(code, external)
+        sandboxed = True
+    else:
+        # Local execution
+        def make_local_fn(tool_code: str):
+            exec_globals = {}
+            exec(tool_code, exec_globals)
+            run_fn = exec_globals.get('run')
+
+            def local_wrapper(params: dict, agent):
+                if run_fn:
+                    return run_fn(**params) if params else run_fn()
+                return {"error": "No 'run' function defined"}
+            return local_wrapper
+
+        wrapper = make_local_fn(code)
+        sandboxed = False
+
+    # Register the tool
+    tool_info = {
+        "name": name,
+        "description": description or f"Dynamic tool: {name}",
+        "parameters": {"type": "object", "properties": {}},
+        "fn": wrapper,
+    }
+    _registered_tools.append(tool_info)
+
+    return {
+        "tool_name": name,
+        "sandboxed": sandboxed,
+        "packages": list(external) if external else [],
+    }
