@@ -62,7 +62,7 @@ class Agent:
           └──────────┘
     """
 
-    def __init__(self, model: str = "claude-sonnet-4-20250514"):
+    def __init__(self, model: str = "claude-sonnet-4-20250514", load_tools: bool = True):
         self.client = anthropic.Anthropic()
         self.model = model
         self.tools: dict[str, Tool] = {}
@@ -73,9 +73,22 @@ class Agent:
         self.register(task_tool)
         self.register(register_tool_tool)
 
+        # Load tools from tools/ folder
+        if load_tools:
+            self._load_external_tools()
+
     def register(self, tool: Tool):
         """Register a new tool with the agent."""
         self.tools[tool.name] = tool
+
+    def _load_external_tools(self):
+        """Load tools from the tools/ folder."""
+        try:
+            from tools import get_all_tools
+            for tool in get_all_tools(Tool):
+                self.register(tool)
+        except ImportError:
+            pass  # tools/ folder not present or not configured
 
     def run(self, user_input: str, thread_id: str = "default") -> str:
         """
@@ -117,11 +130,24 @@ class Agent:
             thread.append({"role": "user", "content": tool_results})
 
     def _system_prompt(self) -> str:
-        return """You are a helpful assistant. Use tools when needed.
+        return """You are a helpful assistant with access to powerful tools.
 
-For memory: store important facts, retrieve when relevant.
-For tasks: create, update, complete tasks as requested.
-For new capabilities: register new tools when the user describes them."""
+Core capabilities:
+- Memory: store important facts, retrieve when relevant
+- Tasks: create, update, complete tasks as requested
+- Register new tools: extend your capabilities at runtime
+
+Web & Email (if configured):
+- web_search: Quick DuckDuckGo searches (no API key needed)
+- browse: Full browser automation - can fill forms, click, extract data
+- get_agent_email, send_email, check_inbox: Email via AgentMail
+
+Secrets management:
+- get_secret, store_secret: Secure API key storage
+- request_api_key: Ask user for missing keys
+
+You can autonomously obtain API keys by browsing to service signup pages,
+using your email for verification, and extracting keys from dashboards."""
 
     def _tool_schemas(self) -> list:
         return [t.schema for t in self.tools.values()]
