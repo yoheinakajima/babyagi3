@@ -15,7 +15,7 @@ Chat continues while objectives work. Objectives can spawn sub-objectives.
 import asyncio
 import json
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Callable
 
@@ -112,6 +112,7 @@ class Agent:
         self.register(_memory_tool(self))
         self.register(_objective_tool(self))
         self.register(_notes_tool(self))
+        self.register(_register_tool_tool(self))
 
     def _load_external_tools(self):
         """Load tools from the tools/ folder."""
@@ -264,7 +265,10 @@ CAPABILITIES:
 
 5. **Memory**: Store and recall facts.
 
-6. **Web/Email/Secrets**: If configured, search web, browse pages, send emails.
+6. **Register New Tools**: Extend your capabilities at runtime. You can import
+   ANY Python package - they are auto-installed in a secure sandbox.
+
+7. **Web/Email/Secrets**: If configured, search web, browse pages, send emails.
 {obj_summary}
 
 Be proactive about using background objectives for complex work."""
@@ -451,6 +455,111 @@ def _notes_tool(agent: Agent) -> Tool:
                 "id": {"type": "integer", "description": "Note ID (for complete/remove)"}
             },
             "required": ["action"]
+        },
+        fn=fn
+    )
+
+
+def _register_tool_tool(agent: Agent) -> Tool:
+    """Register new tools at runtime with e2b sandbox for external packages."""
+
+    def fn(params: dict, ag: Agent) -> dict:
+        code = params["code"]
+        tool_var_name = params["tool_var_name"]
+
+        # Detect imports to determine if we need sandboxing
+        try:
+            from tools.sandbox import detect_imports, run_in_sandbox
+            packages = detect_imports(code)
+        except ImportError:
+            packages = []
+
+        if packages:
+            # External dependencies detected - use e2b sandbox
+            sandbox_code = f"""
+{code}
+
+# Export tool definition as dict for serialization
+_tool = {tool_var_name}
+result = {{
+    "name": _tool.name,
+    "description": _tool.schema["description"],
+    "parameters": _tool.schema["input_schema"],
+}}
+result
+"""
+            result = run_in_sandbox(sandbox_code, packages)
+
+            if "error" in result:
+                return {"error": result["error"]}
+
+            # Create a wrapper that executes in sandbox
+            tool_def = eval(result["result"])  # Safe: we control sandbox output
+
+            def sandboxed_executor(exec_code, pkgs):
+                def executor(params: dict, _ag: Agent) -> dict:
+                    full_code = f"""
+{exec_code}
+import json
+_tool = {tool_var_name}
+_result = _tool.fn({json.dumps(params)}, None)
+json.dumps(_result)
+"""
+                    res = run_in_sandbox(full_code, pkgs)
+                    if "error" in res:
+                        return {"error": res["error"]}
+                    return json.loads(res["result"])
+                return executor
+
+            new_tool = Tool(
+                name=tool_def["name"],
+                description=tool_def["description"],
+                parameters=tool_def["parameters"],
+                fn=sandboxed_executor(code, packages)
+            )
+            ag.register(new_tool)
+            return {
+                "registered": new_tool.name,
+                "description": new_tool.schema["description"],
+                "sandboxed": True,
+                "packages": packages
+            }
+
+        # No external dependencies - run locally (fast path)
+        namespace = {
+            "Tool": Tool,
+            "datetime": datetime,
+            "json": json,
+        }
+
+        try:
+            exec(code, namespace)
+            new_tool = namespace[tool_var_name]
+            ag.register(new_tool)
+            return {
+                "registered": new_tool.name,
+                "description": new_tool.schema["description"],
+                "sandboxed": False
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
+    return Tool(
+        name="register_tool",
+        description="Register a new tool by providing Python code that defines a Tool instance. The code can import ANY package (e.g., requests, pandas, numpy) - imports are auto-detected and packages are installed in a sandbox.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string",
+                    "description": "Python code defining the tool function and Tool instance"
+                },
+                "tool_var_name": {
+                    "type": "string",
+                    "description": "Variable name of the Tool instance in the code"
+                }
+            },
+            "required": ["code", "tool_var_name"]
         },
         fn=fn
     )
