@@ -1,19 +1,21 @@
 """
-Unified Message Abstraction Agent
+Unified Message Abstraction Agent with Background Objectives
 
-The most elegant systems have a single unifying abstraction.
-For an AI assistant, that abstraction is: everything is a message in a conversation.
+Core insight: Everything is still a message, but some messages trigger background work.
 
 - User input → message
 - Assistant response → message
 - Tool execution → message
-- Memory retrieval → message
-- Task state → message
+- Background objective → messages in its own thread
 
-This means the entire system reduces to: a loop that processes messages and decides what to do next.
+The elegance: objectives are just agent runs in separate threads.
+Chat continues while objectives work. Objectives can spawn sub-objectives.
 """
 
+import asyncio
 import json
+import uuid
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Callable
 
@@ -21,17 +23,38 @@ import anthropic
 
 
 # =============================================================================
-# Core Data Model: Message, Tool, Thread
+# Core Data Model
 # =============================================================================
 
-class Tool:
+@dataclass
+class Objective:
     """
-    A tool is a capability the agent can use.
+    An objective is background work with its own conversation thread.
 
-    Memory? It's a tool that reads/writes to storage.
-    Tasks? It's a tool that manages a list.
-    Learning new tools? It's a tool that registers new tools.
+    Simple objectives: "search for X and summarize"
+    Complex objectives: "research Y, create a report, email it to Z"
+
+    The agent handles complexity naturally through its loop.
     """
+    id: str
+    goal: str
+    status: str = "pending"  # pending, running, completed, failed
+    thread_id: str = ""
+    schedule: str | None = None  # cron expression for recurring
+    result: str | None = None
+    error: str | None = None
+    created: str = ""
+    completed: str | None = None
+
+    def __post_init__(self):
+        if not self.thread_id:
+            self.thread_id = f"objective_{self.id}"
+        if not self.created:
+            self.created = datetime.now().isoformat()
+
+
+class Tool:
+    """A capability the agent can use."""
 
     def __init__(self, name: str, description: str, parameters: dict, fn: Callable):
         self.name = name
@@ -48,38 +71,48 @@ class Tool:
 
 class Agent:
     """
-    The minimal agent: a loop that processes messages and decides what to do next.
+    The agent: a loop that processes messages, with support for background objectives.
 
-    ┌─────────────────────────┐
-    │         LOOP            │
-    │   input → LLM → action  │
-    │          ↑         │    │
-    │          └─────────┘    │
-    └───────────┬─────────────┘
-                ↓
-          ┌──────────┐
-          │  Tools   │
-          └──────────┘
+    ┌─────────────────────────────────────────┐
+    │              Agent                       │
+    │  ┌─────────┐  ┌────────────┐            │
+    │  │ Threads │  │ Objectives │            │
+    │  │  (chat) │  │ (bg work)  │            │
+    │  └────┬────┘  └─────┬──────┘            │
+    │       └──────┬──────┘                   │
+    │              ▼                          │
+    │         ┌────────┐                      │
+    │         │ Tools  │                      │
+    │         └────────┘                      │
+    └─────────────────────────────────────────┘
     """
 
     def __init__(self, model: str = "claude-sonnet-4-20250514", load_tools: bool = True):
         self.client = anthropic.Anthropic()
         self.model = model
         self.tools: dict[str, Tool] = {}
-        self.threads: dict[str, list] = {"default": []}
+        self.threads: dict[str, list] = {"main": []}
+        self.objectives: dict[str, Objective] = {}
+        self._running_objectives: set[str] = set()
+        self._lock = asyncio.Lock()
 
-        # Bootstrap with core tools
-        self.register(memory_tool)
-        self.register(task_tool)
-        self.register(register_tool_tool)
+        # Register core tools
+        self._register_core_tools()
 
-        # Load tools from tools/ folder
+        # Load external tools
         if load_tools:
             self._load_external_tools()
 
     def register(self, tool: Tool):
-        """Register a new tool with the agent."""
+        """Register a tool."""
         self.tools[tool.name] = tool
+
+    def _register_core_tools(self):
+        """Register the built-in tools."""
+        self.register(_memory_tool(self))
+        self.register(_objective_tool(self))
+        self.register(_notes_tool(self))
+        self.register(_register_tool_tool(self))
 
     def _load_external_tools(self):
         """Load tools from the tools/ folder."""
@@ -88,19 +121,29 @@ class Agent:
             for tool in get_all_tools(Tool):
                 self.register(tool)
         except ImportError:
-            pass  # tools/ folder not present or not configured
+            pass
 
-    def run(self, user_input: str, thread_id: str = "default") -> str:
-        """
-        Process user input and return a response.
+    # -------------------------------------------------------------------------
+    # Message Processing
+    # -------------------------------------------------------------------------
 
-        This is the entire control flow: a single loop.
+    def run(self, user_input: str, thread_id: str = "main") -> str:
         """
+        Process user input synchronously.
+        For async with background objectives, use run_async().
+        """
+        return asyncio.get_event_loop().run_until_complete(
+            self.run_async(user_input, thread_id)
+        )
+
+    async def run_async(self, user_input: str, thread_id: str = "main") -> str:
+        """Process user input and return response. Objectives run in background."""
         thread = self.threads.setdefault(thread_id, [])
         thread.append({"role": "user", "content": user_input})
 
         while True:
-            response = self.client.messages.create(
+            response = await asyncio.to_thread(
+                self.client.messages.create,
                 model=self.model,
                 max_tokens=8096,
                 system=self._system_prompt(),
@@ -108,14 +151,12 @@ class Agent:
                 messages=thread
             )
 
-            # Collect assistant message
             thread.append({"role": "assistant", "content": response.content})
 
-            # If no tool use, we're done
             if response.stop_reason == "end_turn":
                 return self._extract_text(response)
 
-            # Execute tools and collect results
+            # Execute tools
             tool_results = []
             for block in response.content:
                 if block.type == "tool_use":
@@ -126,28 +167,111 @@ class Agent:
                         "content": json.dumps(result)
                     })
 
-            # Tool results become the next "user" message (API convention)
             thread.append({"role": "user", "content": tool_results})
 
+    async def run_objective(self, objective_id: str):
+        """Execute an objective in the background."""
+        obj = self.objectives.get(objective_id)
+        if not obj or obj.status != "pending":
+            return
+
+        async with self._lock:
+            if objective_id in self._running_objectives:
+                return
+            self._running_objectives.add(objective_id)
+            obj.status = "running"
+
+        try:
+            # Run the objective with its own thread
+            prompt = f"""Complete this objective: {obj.goal}
+
+Work autonomously. Use tools as needed. When done, provide a final summary."""
+
+            result = await self.run_async(prompt, obj.thread_id)
+            obj.result = result
+            obj.status = "completed"
+            obj.completed = datetime.now().isoformat()
+        except Exception as e:
+            obj.status = "failed"
+            obj.error = str(e)
+        finally:
+            self._running_objectives.discard(objective_id)
+
+    # -------------------------------------------------------------------------
+    # Scheduling
+    # -------------------------------------------------------------------------
+
+    async def run_scheduler(self):
+        """Run the scheduler loop for recurring objectives."""
+        while True:
+            now = datetime.now()
+            for obj in list(self.objectives.values()):
+                if obj.schedule and obj.status in ("pending", "completed"):
+                    if self._should_run(obj.schedule, now):
+                        # Reset and re-run
+                        obj.status = "pending"
+                        obj.result = None
+                        obj.completed = None
+                        asyncio.create_task(self.run_objective(obj.id))
+            await asyncio.sleep(60)  # Check every minute
+
+    def _should_run(self, schedule: str, now: datetime) -> bool:
+        """Simple schedule matching: 'hourly', 'daily', or cron-like."""
+        if schedule == "hourly":
+            return now.minute == 0
+        elif schedule == "daily":
+            return now.hour == 0 and now.minute == 0
+        elif schedule.startswith("every "):
+            # "every 5 minutes", "every 2 hours"
+            parts = schedule.split()
+            if len(parts) == 3:
+                n, unit = int(parts[1]), parts[2]
+                if "minute" in unit:
+                    return now.minute % n == 0
+                elif "hour" in unit:
+                    return now.hour % n == 0 and now.minute == 0
+        return False
+
+    # -------------------------------------------------------------------------
+    # Helpers
+    # -------------------------------------------------------------------------
+
     def _system_prompt(self) -> str:
-        return """You are a helpful assistant with access to powerful tools.
+        # Build objective status summary
+        obj_summary = ""
+        active = [o for o in self.objectives.values() if o.status in ("pending", "running")]
+        if active:
+            obj_summary = "\n\nActive objectives:\n" + "\n".join(
+                f"- [{o.id[:8]}] {o.goal} ({o.status})" for o in active
+            )
 
-Core capabilities:
-- Memory: store important facts, retrieve when relevant
-- Tasks: create, update, complete tasks as requested
-- Register new tools: extend your capabilities at runtime. You can import ANY Python package - they are auto-installed in a secure sandbox
+        return f"""You are a helpful assistant with access to powerful tools.
 
-Web & Email (if configured):
-- web_search: Quick DuckDuckGo searches (no API key needed)
-- browse: Full browser automation - can fill forms, click, extract data
-- get_agent_email, send_email, check_inbox: Email via AgentMail
+CAPABILITIES:
 
-Secrets management:
-- get_secret, store_secret: Secure API key storage
-- request_api_key: Ask user for missing keys
+1. **Direct Response**: Answer questions and have conversations normally.
 
-You can autonomously obtain API keys by browsing to service signup pages,
-using your email for verification, and extracting keys from dashboards."""
+2. **Background Objectives**: For tasks that take time (research, multi-step work),
+   use the 'objective' tool to spawn background work. Chat can continue while
+   objectives run. Use this when:
+   - The task is complex or multi-step
+   - The user might want to do other things while waiting
+   - You say things like "I'll work on that" or "Let me research that"
+
+3. **Recurring Tasks**: Objectives can have a schedule ('hourly', 'daily',
+   'every 5 minutes') for recurring work.
+
+4. **Notes**: Simple reminders and todos (passive, unlike objectives).
+
+5. **Memory**: Store and recall facts.
+
+6. **Register New Tools**: Extend your capabilities at runtime. You can import
+   ANY Python package - they are auto-installed in a secure sandbox.
+
+7. **Web/Email/Secrets**: If configured, search web, browse pages, send emails.
+{obj_summary}
+
+Be proactive about using background objectives for complex work."""
 
     def _tool_schemas(self) -> list:
         return [t.schema for t in self.tools.values()]
@@ -155,174 +279,204 @@ using your email for verification, and extracting keys from dashboards."""
     def _extract_text(self, response) -> str:
         return "".join(b.text for b in response.content if hasattr(b, "text"))
 
-    def get_thread(self, thread_id: str = "default") -> list:
-        """Get the message history for a thread."""
+    def get_thread(self, thread_id: str = "main") -> list:
         return self.threads.get(thread_id, [])
 
-    def clear_thread(self, thread_id: str = "default"):
-        """Clear a thread's message history."""
+    def clear_thread(self, thread_id: str = "main"):
         self.threads[thread_id] = []
 
 
 # =============================================================================
-# Core Tools: Memory, Tasks, Register Tool
+# Core Tools
 # =============================================================================
 
-# Memory storage (append-only log)
-MEMORIES = []
-
-def memory_fn(params: dict, agent: Agent) -> dict:
-    """
-    Memory: append-only log + search.
-
-    The elegance is in not over-engineering this:
-    - Append-only log: every memory is immutable, timestamped
-    - Simple search: keyword match (swap for embeddings in production)
-    - LLM does the organizing: give it raw memories and let it synthesize
-    """
-    action = params["action"]
-
-    if action == "store":
-        memory = {
-            "content": params["content"],
-            "timestamp": datetime.now().isoformat()
-        }
-        MEMORIES.append(memory)
-        return {"stored": True, "memory": memory}
-
-    elif action == "search":
-        query = params.get("query", "").lower()
-        if query:
-            # Simple keyword match; swap for embeddings in production
-            matches = [m for m in MEMORIES if query in m["content"].lower()]
-        else:
-            matches = MEMORIES
-        return {"memories": matches[-10:]}  # Return recent matches
-
-    elif action == "list":
-        return {"memories": MEMORIES[-20:]}  # Return recent memories
-
-    return {"error": f"Unknown action: {action}"}
+# Shared storage
+MEMORIES: list[dict] = []
+NOTES: list[dict] = []
 
 
-memory_tool = Tool(
-    name="memory",
-    description="Store or search memories. Use 'store' to remember important facts, 'search' to recall by keyword, 'list' to see recent memories.",
-    parameters={
-        "type": "object",
-        "properties": {
-            "action": {
-                "type": "string",
-                "enum": ["store", "search", "list"],
-                "description": "The action to perform"
+def _memory_tool(agent: Agent) -> Tool:
+    """Memory: store and recall facts."""
+
+    def fn(params: dict, _agent: Agent) -> dict:
+        action = params["action"]
+
+        if action == "store":
+            memory = {"content": params["content"], "ts": datetime.now().isoformat()}
+            MEMORIES.append(memory)
+            return {"stored": True}
+
+        elif action == "search":
+            query = params.get("query", "").lower()
+            matches = [m for m in MEMORIES if query in m["content"].lower()] if query else MEMORIES
+            return {"memories": matches[-10:]}
+
+        elif action == "list":
+            return {"memories": MEMORIES[-20:]}
+
+        return {"error": f"Unknown action: {action}"}
+
+    return Tool(
+        name="memory",
+        description="Store or search memories. Actions: store (content), search (query), list.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["store", "search", "list"]},
+                "content": {"type": "string", "description": "Content to store"},
+                "query": {"type": "string", "description": "Search query"}
             },
-            "content": {
-                "type": "string",
-                "description": "The content to store (required for 'store' action)"
-            },
-            "query": {
-                "type": "string",
-                "description": "The search query (required for 'search' action)"
-            }
+            "required": ["action"]
         },
-        "required": ["action"]
-    },
-    fn=memory_fn
-)
+        fn=fn
+    )
 
 
-# Task storage
-TASKS = []
+def _objective_tool(agent: Agent) -> Tool:
+    """Objective management: spawn, list, check background work."""
 
-def task_fn(params: dict, agent: Agent) -> dict:
-    """
-    Tasks: simple CRUD on a list.
+    def fn(params: dict, ag: Agent) -> dict:
+        action = params["action"]
 
-    Tasks are just messages with a task-management tool.
-    """
-    action = params["action"]
-
-    if action == "add":
-        task = {
-            "id": len(TASKS),
-            "text": params["text"],
-            "done": False,
-            "created": datetime.now().isoformat()
-        }
-        TASKS.append(task)
-        return {"added": task}
-
-    elif action == "list":
-        return {"tasks": TASKS}
-
-    elif action == "complete":
-        task_id = params["id"]
-        if 0 <= task_id < len(TASKS):
-            TASKS[task_id]["done"] = True
-            TASKS[task_id]["completed"] = datetime.now().isoformat()
-            return {"completed": TASKS[task_id]}
-        return {"error": f"Task {task_id} not found"}
-
-    elif action == "remove":
-        task_id = params["id"]
-        if 0 <= task_id < len(TASKS):
-            removed = TASKS.pop(task_id)
-            # Re-index remaining tasks
-            for i, task in enumerate(TASKS):
-                task["id"] = i
-            return {"removed": removed}
-        return {"error": f"Task {task_id} not found"}
-
-    return {"error": f"Unknown action: {action}"}
-
-
-task_tool = Tool(
-    name="tasks",
-    description="Manage tasks: add (with 'text'), list, complete (with 'id'), or remove (with 'id').",
-    parameters={
-        "type": "object",
-        "properties": {
-            "action": {
-                "type": "string",
-                "enum": ["add", "list", "complete", "remove"],
-                "description": "The action to perform"
-            },
-            "text": {
-                "type": "string",
-                "description": "The task text (required for 'add' action)"
-            },
-            "id": {
-                "type": "integer",
-                "description": "The task ID (required for 'complete' and 'remove' actions)"
+        if action == "spawn":
+            obj_id = str(uuid.uuid4())[:8]
+            obj = Objective(
+                id=obj_id,
+                goal=params["goal"],
+                schedule=params.get("schedule")
+            )
+            ag.objectives[obj_id] = obj
+            # Start in background
+            asyncio.create_task(ag.run_objective(obj_id))
+            return {
+                "spawned": obj_id,
+                "goal": obj.goal,
+                "schedule": obj.schedule,
+                "message": "Objective started in background. Chat can continue."
             }
+
+        elif action == "list":
+            return {"objectives": [
+                {"id": o.id, "goal": o.goal, "status": o.status,
+                 "schedule": o.schedule, "result": o.result[:200] if o.result else None}
+                for o in ag.objectives.values()
+            ]}
+
+        elif action == "check":
+            obj_id = params["id"]
+            obj = ag.objectives.get(obj_id)
+            if not obj:
+                return {"error": f"Objective {obj_id} not found"}
+            return {
+                "id": obj.id, "goal": obj.goal, "status": obj.status,
+                "result": obj.result, "error": obj.error
+            }
+
+        elif action == "cancel":
+            obj_id = params["id"]
+            obj = ag.objectives.get(obj_id)
+            if obj:
+                obj.status = "cancelled"
+                return {"cancelled": obj_id}
+            return {"error": f"Objective {obj_id} not found"}
+
+        return {"error": f"Unknown action: {action}"}
+
+    return Tool(
+        name="objective",
+        description="""Manage background objectives (async work).
+
+Actions:
+- spawn: Create new objective (goal, optional schedule like 'hourly', 'daily', 'every 5 minutes')
+- list: See all objectives and their status
+- check: Get details of specific objective (id)
+- cancel: Stop an objective (id)
+
+Use spawn for complex/time-consuming tasks. The objective runs in background while chat continues.""",
+        parameters={
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["spawn", "list", "check", "cancel"]},
+                "goal": {"type": "string", "description": "What to accomplish (for spawn)"},
+                "schedule": {"type": "string", "description": "Recurring schedule (for spawn)"},
+                "id": {"type": "string", "description": "Objective ID (for check/cancel)"}
+            },
+            "required": ["action"]
         },
-        "required": ["action"]
-    },
-    fn=task_fn
-)
+        fn=fn
+    )
 
 
-def register_tool_fn(params: dict, agent: Agent) -> dict:
-    """
-    Meta-tool: register new tools at runtime.
+def _notes_tool(agent: Agent) -> Tool:
+    """Notes: simple todo list (passive, unlike objectives)."""
 
-    If the code imports external packages, executes in e2b sandbox.
-    Otherwise, runs locally for speed.
-    """
-    code = params["code"]
-    tool_var_name = params["tool_var_name"]
+    def fn(params: dict, _agent: Agent) -> dict:
+        action = params["action"]
 
-    # Detect imports to determine if we need sandboxing
-    try:
-        from tools.sandbox import detect_imports, run_in_sandbox
-        packages = detect_imports(code)
-    except ImportError:
-        packages = []
+        if action == "add":
+            note = {
+                "id": len(NOTES),
+                "text": params["text"],
+                "done": False,
+                "created": datetime.now().isoformat()
+            }
+            NOTES.append(note)
+            return {"added": note}
 
-    if packages:
-        # External dependencies detected - use e2b sandbox
-        # Install packages and execute code in sandbox
-        sandbox_code = f"""
+        elif action == "list":
+            return {"notes": NOTES}
+
+        elif action == "complete":
+            note_id = params["id"]
+            if 0 <= note_id < len(NOTES):
+                NOTES[note_id]["done"] = True
+                return {"completed": NOTES[note_id]}
+            return {"error": f"Note {note_id} not found"}
+
+        elif action == "remove":
+            note_id = params["id"]
+            if 0 <= note_id < len(NOTES):
+                removed = NOTES.pop(note_id)
+                for i, note in enumerate(NOTES):
+                    note["id"] = i
+                return {"removed": removed}
+            return {"error": f"Note {note_id} not found"}
+
+        return {"error": f"Unknown action: {action}"}
+
+    return Tool(
+        name="notes",
+        description="Simple notes/todos. Actions: add (text), list, complete (id), remove (id).",
+        parameters={
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["add", "list", "complete", "remove"]},
+                "text": {"type": "string", "description": "Note text (for add)"},
+                "id": {"type": "integer", "description": "Note ID (for complete/remove)"}
+            },
+            "required": ["action"]
+        },
+        fn=fn
+    )
+
+
+def _register_tool_tool(agent: Agent) -> Tool:
+    """Register new tools at runtime with e2b sandbox for external packages."""
+
+    def fn(params: dict, ag: Agent) -> dict:
+        code = params["code"]
+        tool_var_name = params["tool_var_name"]
+
+        # Detect imports to determine if we need sandboxing
+        try:
+            from tools.sandbox import detect_imports, run_in_sandbox
+            packages = detect_imports(code)
+        except ImportError:
+            packages = []
+
+        if packages:
+            # External dependencies detected - use e2b sandbox
+            sandbox_code = f"""
 {code}
 
 # Export tool definition as dict for serialization
@@ -334,114 +488,122 @@ result = {{
 }}
 result
 """
-        result = run_in_sandbox(sandbox_code, packages)
+            result = run_in_sandbox(sandbox_code, packages)
 
-        if "error" in result:
-            return {"error": result["error"]}
+            if "error" in result:
+                return {"error": result["error"]}
 
-        # Create a wrapper that executes in sandbox
-        tool_def = eval(result["result"])  # Safe: we control sandbox output
+            # Create a wrapper that executes in sandbox
+            tool_def = eval(result["result"])  # Safe: we control sandbox output
 
-        def sandboxed_executor(exec_code):
-            def executor(params: dict, agent: Agent) -> dict:
-                # Re-run the tool code + execution in sandbox
-                full_code = f"""
-{code}
+            def sandboxed_executor(exec_code, pkgs):
+                def executor(params: dict, _ag: Agent) -> dict:
+                    full_code = f"""
+{exec_code}
 import json
 _tool = {tool_var_name}
 _result = _tool.fn({json.dumps(params)}, None)
 json.dumps(_result)
 """
-                res = run_in_sandbox(full_code, packages)
-                if "error" in res:
-                    return {"error": res["error"]}
-                return json.loads(res["result"])
-            return executor
+                    res = run_in_sandbox(full_code, pkgs)
+                    if "error" in res:
+                        return {"error": res["error"]}
+                    return json.loads(res["result"])
+                return executor
 
-        new_tool = Tool(
-            name=tool_def["name"],
-            description=tool_def["description"],
-            parameters=tool_def["parameters"],
-            fn=sandboxed_executor(code)
-        )
-        agent.register(new_tool)
-        return {
-            "registered": new_tool.name,
-            "description": new_tool.schema["description"],
-            "sandboxed": True,
-            "packages": packages
-        }
-
-    # No external dependencies - run locally (fast path)
-    namespace = {
-        "Tool": Tool,
-        "datetime": datetime,
-        "json": json,
-    }
-
-    try:
-        exec(code, namespace)
-        new_tool = namespace[tool_var_name]
-        agent.register(new_tool)
-        return {
-            "registered": new_tool.name,
-            "description": new_tool.schema["description"],
-            "sandboxed": False
-        }
-    except Exception as e:
-        return {"error": str(e)}
-
-
-register_tool_tool = Tool(
-    name="register_tool",
-    description="Register a new tool by providing Python code that defines a Tool instance. The code can import ANY package (e.g., requests, pandas, numpy) - imports are auto-detected and packages are installed in a sandbox. The code should create a Tool() and assign it to a variable.",
-    parameters={
-        "type": "object",
-        "properties": {
-            "code": {
-                "type": "string",
-                "description": "Python code defining the tool function and Tool instance"
-            },
-            "tool_var_name": {
-                "type": "string",
-                "description": "Variable name of the Tool instance in the code"
+            new_tool = Tool(
+                name=tool_def["name"],
+                description=tool_def["description"],
+                parameters=tool_def["parameters"],
+                fn=sandboxed_executor(code, packages)
+            )
+            ag.register(new_tool)
+            return {
+                "registered": new_tool.name,
+                "description": new_tool.schema["description"],
+                "sandboxed": True,
+                "packages": packages
             }
+
+        # No external dependencies - run locally (fast path)
+        namespace = {
+            "Tool": Tool,
+            "datetime": datetime,
+            "json": json,
+        }
+
+        try:
+            exec(code, namespace)
+            new_tool = namespace[tool_var_name]
+            ag.register(new_tool)
+            return {
+                "registered": new_tool.name,
+                "description": new_tool.schema["description"],
+                "sandboxed": False
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
+    return Tool(
+        name="register_tool",
+        description="Register a new tool by providing Python code that defines a Tool instance. The code can import ANY package (e.g., requests, pandas, numpy) - imports are auto-detected and packages are installed in a sandbox.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string",
+                    "description": "Python code defining the tool function and Tool instance"
+                },
+                "tool_var_name": {
+                    "type": "string",
+                    "description": "Variable name of the Tool instance in the code"
+                }
+            },
+            "required": ["code", "tool_var_name"]
         },
-        "required": ["code", "tool_var_name"]
-    },
-    fn=register_tool_fn
-)
+        fn=fn
+    )
 
 
 # =============================================================================
-# CLI Interface
+# CLI
 # =============================================================================
 
-def main():
-    """Simple REPL for interacting with the agent."""
-    print("Unified Message Abstraction Agent")
+async def main_async():
+    """Async REPL with background objective support."""
+    print("Agent with Background Objectives")
     print("=" * 40)
-    print("Everything is a message. Type 'quit' to exit.\n")
+    print("Chat continues while objectives work in background.")
+    print("Type 'quit' to exit.\n")
 
     agent = Agent()
 
-    while True:
-        try:
-            user_input = input("You: ").strip()
+    # Start scheduler for recurring objectives
+    scheduler_task = asyncio.create_task(agent.run_scheduler())
+
+    try:
+        while True:
+            user_input = await asyncio.to_thread(input, "You: ")
+            user_input = user_input.strip()
+
             if user_input.lower() in ("quit", "exit", "q"):
                 print("Goodbye!")
                 break
             if not user_input:
                 continue
 
-            response = agent.run(user_input)
+            response = await agent.run_async(user_input)
             print(f"Assistant: {response}\n")
 
-        except KeyboardInterrupt:
-            print("\nGoodbye!")
-            break
-        except Exception as e:
-            print(f"Error: {e}\n")
+    except KeyboardInterrupt:
+        print("\nGoodbye!")
+    finally:
+        scheduler_task.cancel()
+
+
+def main():
+    """Entry point."""
+    asyncio.run(main_async())
 
 
 if __name__ == "__main__":
