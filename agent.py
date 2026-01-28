@@ -17,9 +17,29 @@ import json
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Callable
+from typing import Callable, Protocol, runtime_checkable
 
 import anthropic
+
+
+# =============================================================================
+# Tool Validation
+# =============================================================================
+
+class ToolValidationError(Exception):
+    """Raised when a tool fails validation during registration."""
+    pass
+
+
+@runtime_checkable
+class ToolLike(Protocol):
+    """Protocol for duck-typed tool validation.
+
+    Any object with these attributes can be converted to a Tool.
+    """
+    name: str
+    fn: Callable
+    schema: dict
 
 
 # =============================================================================
@@ -103,9 +123,69 @@ class Agent:
         if load_tools:
             self._load_external_tools()
 
-    def register(self, tool: Tool):
-        """Register a tool."""
-        self.tools[tool.name] = tool
+    def register(self, tool: Tool | ToolLike):
+        """Register a tool with validation.
+
+        Accepts Tool instances or any object matching ToolLike protocol.
+        Duck-typed objects are automatically converted to Tool instances.
+
+        Raises:
+            ToolValidationError: If tool is malformed or missing required attributes.
+        """
+        validated = self._validate_and_convert(tool)
+        self.tools[validated.name] = validated
+
+    def _validate_and_convert(self, obj) -> Tool:
+        """Validate and convert an object to a proper Tool instance.
+
+        This provides defense against:
+        - Custom classes missing required attributes
+        - Malformed schema dictionaries
+        - Missing or invalid tool functions
+        """
+        # Already a proper Tool instance
+        if isinstance(obj, Tool):
+            return obj
+
+        # Check for ToolLike protocol (duck typing)
+        if isinstance(obj, ToolLike):
+            # Validate schema structure
+            schema = obj.schema
+            if not isinstance(schema, dict):
+                raise ToolValidationError(
+                    f"Tool '{getattr(obj, 'name', '?')}' has invalid schema: expected dict, got {type(schema).__name__}"
+                )
+            if "name" not in schema or "input_schema" not in schema:
+                raise ToolValidationError(
+                    f"Tool '{obj.name}' schema missing required keys. "
+                    f"Expected 'name', 'description', 'input_schema'. Got: {list(schema.keys())}"
+                )
+            # Convert to proper Tool
+            return Tool(
+                name=obj.name,
+                description=schema.get("description", f"Tool: {obj.name}"),
+                parameters=schema["input_schema"],
+                fn=obj.fn
+            )
+
+        # Not a Tool and doesn't match protocol - provide helpful error
+        missing = []
+        for attr in ("name", "fn", "schema"):
+            if not hasattr(obj, attr):
+                missing.append(attr)
+
+        if missing:
+            raise ToolValidationError(
+                f"Invalid tool object (type: {type(obj).__name__}). "
+                f"Missing required attributes: {missing}. "
+                f"Use the Tool class or ensure your class has 'name', 'fn', and 'schema' attributes."
+            )
+
+        # Has attributes but wrong types
+        raise ToolValidationError(
+            f"Tool '{getattr(obj, 'name', '?')}' has attributes but failed protocol check. "
+            f"Verify 'name' is str, 'fn' is callable, and 'schema' is dict."
+        )
 
     def _register_core_tools(self):
         """Register the built-in tools."""
@@ -535,24 +615,54 @@ json.dumps(_result)
         try:
             exec(code, namespace)
             new_tool = namespace[tool_var_name]
-            ag.register(new_tool)
+            ag.register(new_tool)  # Will raise ToolValidationError if malformed
             return {
                 "registered": new_tool.name,
                 "description": new_tool.schema["description"],
                 "sandboxed": False
+            }
+        except ToolValidationError as e:
+            # Provide clear guidance on how to fix
+            return {
+                "error": str(e),
+                "hint": "Use the Tool class: Tool(name='...', description='...', parameters={...}, fn=your_function)"
+            }
+        except KeyError:
+            return {
+                "error": f"Variable '{tool_var_name}' not found in code",
+                "hint": f"Ensure your code defines a variable named '{tool_var_name}'"
             }
         except Exception as e:
             return {"error": str(e)}
 
     return Tool(
         name="register_tool",
-        description="Register a new tool by providing Python code that defines a Tool instance. The code can import ANY package (e.g., requests, pandas, numpy) - imports are auto-detected and packages are installed in a sandbox.",
+        description="""Register a new tool by providing Python code.
+
+IMPORTANT: You MUST use the provided Tool class to define your tool:
+
+    def my_fn(params: dict, agent) -> dict:
+        return {"result": params["input"]}
+
+    my_tool = Tool(
+        name="my_tool",
+        description="Does something useful",
+        parameters={
+            "type": "object",
+            "properties": {"input": {"type": "string"}},
+            "required": ["input"]
+        },
+        fn=my_fn
+    )
+
+The Tool class is pre-loaded in the namespace. External packages (requests, pandas, etc.)
+are auto-detected and installed in a sandbox.""",
         parameters={
             "type": "object",
             "properties": {
                 "code": {
                     "type": "string",
-                    "description": "Python code defining the tool function and Tool instance"
+                    "description": "Python code using the Tool class to define a tool instance"
                 },
                 "tool_var_name": {
                     "type": "string",
