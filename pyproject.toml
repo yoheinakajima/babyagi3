@@ -5,4 +5,5 @@ description = "Add your description here"
 requires-python = ">=3.12"
 dependencies = [
     "anthropic>=0.76.0",
+    "e2b-code-interpreter>=1.0.0",
 ]
