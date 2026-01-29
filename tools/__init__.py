@@ -214,3 +214,118 @@ def init_tools(tool_class):
     """Initialize the tools framework with the Tool class."""
     global _Tool
     _Tool = tool_class
+
+
+def check_tool_health() -> dict:
+    """
+    Check the health/availability of all tools.
+
+    Returns a structured report of:
+    - Which tools are fully functional
+    - Which have missing dependencies
+    - Which need API keys configured
+
+    This powers the AI greeting with situational awareness.
+    """
+    import os
+
+    health = {
+        "ready": [],      # Fully functional tools
+        "needs_setup": [],  # Missing API keys
+        "unavailable": [],  # Missing packages
+    }
+
+    # Define tool requirements
+    tool_checks = [
+        # (tool_name, packages, env_vars)
+        ("web_search", ["duckduckgo_search"], []),
+        ("fetch_url", ["httpx", "bs4"], []),
+        ("browse", ["browser_use", "langchain_anthropic"], ["ANTHROPIC_API_KEY"]),
+        ("auto_signup", ["browser_use", "agentmail"], ["ANTHROPIC_API_KEY", "AGENTMAIL_API_KEY"]),
+        ("get_agent_email", ["agentmail"], ["AGENTMAIL_API_KEY"]),
+        ("send_email", ["agentmail"], ["AGENTMAIL_API_KEY"]),
+        ("check_inbox", ["agentmail"], ["AGENTMAIL_API_KEY"]),
+        ("read_email", ["agentmail"], ["AGENTMAIL_API_KEY"]),
+        ("wait_for_email", ["agentmail"], ["AGENTMAIL_API_KEY"]),
+        ("get_secret", ["keyring"], []),
+        ("store_secret", ["keyring"], []),
+        ("delete_secret", ["keyring"], []),
+        ("list_secrets", [], []),
+        ("request_api_key", ["keyring"], []),
+        ("check_required_secrets", ["keyring"], []),
+    ]
+
+    for tool_name, packages, env_vars in tool_checks:
+        # Check packages
+        missing_packages = []
+        for pkg in packages:
+            try:
+                __import__(pkg)
+            except ImportError:
+                missing_packages.append(pkg)
+
+        # Check env vars
+        missing_env = [var for var in env_vars if not os.environ.get(var)]
+
+        if missing_packages:
+            health["unavailable"].append({
+                "name": tool_name,
+                "missing": missing_packages,
+                "reason": "packages"
+            })
+        elif missing_env:
+            health["needs_setup"].append({
+                "name": tool_name,
+                "missing": missing_env,
+                "reason": "api_keys"
+            })
+        else:
+            health["ready"].append(tool_name)
+
+    # Add core tools (always available)
+    core_tools = ["memory", "objective", "notes", "register_tool"]
+    health["ready"] = core_tools + health["ready"]
+
+    # Check E2B for sandbox capability
+    if os.environ.get("E2B_API_KEY"):
+        health["ready"].append("sandbox")
+    else:
+        health["needs_setup"].append({
+            "name": "sandbox",
+            "missing": ["E2B_API_KEY"],
+            "reason": "api_keys"
+        })
+
+    # Generate summary
+    health["summary"] = {
+        "total_ready": len(health["ready"]),
+        "needs_api_keys": len(health["needs_setup"]),
+        "needs_packages": len(health["unavailable"]),
+    }
+
+    return health
+
+
+def get_health_summary() -> str:
+    """
+    Get a concise human-readable health summary for the AI greeting.
+    """
+    health = check_tool_health()
+
+    lines = []
+
+    # Ready tools
+    if health["ready"]:
+        lines.append(f"Ready: {', '.join(health['ready'])}")
+
+    # Tools needing API keys
+    if health["needs_setup"]:
+        needs = [f"{t['name']}({','.join(t['missing'])})" for t in health["needs_setup"]]
+        lines.append(f"Need API keys: {', '.join(needs)}")
+
+    # Unavailable tools
+    if health["unavailable"]:
+        unavail = [f"{t['name']}({','.join(t['missing'])})" for t in health["unavailable"]]
+        lines.append(f"Missing packages: {', '.join(unavail)}")
+
+    return "\n".join(lines)

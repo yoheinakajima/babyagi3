@@ -44,17 +44,8 @@ def _mask_key(key: str) -> str:
     return f"{key[:4]}...{key[-4:]}"
 
 
-@tool
-def get_secret(name: str) -> dict:
-    """Retrieve a stored secret/API key.
-
-    Checks in order:
-    1. Environment variables (NAME as-is, or with _API_KEY suffix)
-    2. Keyring storage
-
-    Args:
-        name: Name of the secret (e.g., "SERPAPI", "GITHUB_TOKEN")
-    """
+def _check_secret(name: str) -> dict:
+    """Internal helper to check for a secret (used by multiple tools)."""
     # Normalize name
     name_upper = name.upper().replace("-", "_")
 
@@ -67,7 +58,6 @@ def get_secret(name: str) -> dict:
                 "name": name,
                 "source": "environment",
                 "masked_value": _mask_key(value),
-                # Don't return the actual value - tools should read from env directly
                 "env_var": env_name
             }
 
@@ -94,6 +84,20 @@ def get_secret(name: str) -> dict:
         "name": name,
         "message": f"No secret found for '{name}'. Use request_api_key to ask the user, or store_secret if you have the value."
     }
+
+
+@tool
+def get_secret(name: str) -> dict:
+    """Retrieve a stored secret/API key.
+
+    Checks in order:
+    1. Environment variables (NAME as-is, or with _API_KEY suffix)
+    2. Keyring storage
+
+    Args:
+        name: Name of the secret (e.g., "SERPAPI", "GITHUB_TOKEN")
+    """
+    return _check_secret(name)
 
 
 @tool
@@ -236,7 +240,7 @@ def request_api_key(
     name_upper = name.upper().replace("-", "_")
 
     # Check if we actually need it
-    existing = get_secret.__wrapped__(name)  # Call underlying function
+    existing = _check_secret(name)
     if existing.get("found"):
         return {
             "already_available": True,
@@ -280,7 +284,7 @@ def check_required_secrets(required: list) -> dict:
     }
 
     for name in required:
-        check = get_secret.__wrapped__(name)
+        check = _check_secret(name)
         if check.get("found"):
             results["available"].append(name)
         else:
