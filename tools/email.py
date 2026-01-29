@@ -23,6 +23,7 @@ from tools import tool
 # Cache the client and inbox
 _client = None
 _default_inbox = None
+_default_inbox_id = None
 
 
 def _get_client():
@@ -45,12 +46,27 @@ def _get_client():
     return _client
 
 
-def _get_default_inbox():
-    """Get or create the agent's default inbox."""
-    global _default_inbox
+def _get_inbox_id():
+    """Get the inbox ID (email address) to use.
 
-    if _default_inbox is not None:
-        return _default_inbox
+    Priority:
+    1. AGENTMAIL_INBOX_ID environment variable (if set)
+    2. First inbox from account
+    3. Create a new inbox
+
+    Returns the inbox_id (email address format like 'name@agentmail.to')
+    """
+    global _default_inbox_id, _default_inbox
+
+    # Check if we already have a cached inbox ID
+    if _default_inbox_id is not None:
+        return _default_inbox_id
+
+    # Check for configured inbox ID first
+    configured_inbox = os.environ.get("AGENTMAIL_INBOX_ID")
+    if configured_inbox:
+        _default_inbox_id = configured_inbox
+        return _default_inbox_id
 
     client = _get_client()
     if not client:
@@ -58,17 +74,37 @@ def _get_default_inbox():
 
     try:
         # Try to get existing inboxes first
-        inboxes = client.inboxes.list()
-        if inboxes and len(inboxes) > 0:
-            _default_inbox = inboxes[0]
-            return _default_inbox
+        inboxes_response = client.inboxes.list()
+        # Handle both list response object and direct list
+        inboxes = getattr(inboxes_response, 'inboxes', None) or inboxes_response
 
-        # Create a new inbox
-        _default_inbox = client.inboxes.create()
-        return _default_inbox
+        if inboxes and len(inboxes) > 0:
+            inbox = inboxes[0]
+            _default_inbox = inbox
+            # inbox_id is the email address (e.g., 'name@agentmail.to')
+            _default_inbox_id = getattr(inbox, 'inbox_id', None) or getattr(inbox, 'id', None)
+            return _default_inbox_id
+
+        # Create a new inbox if none exist
+        inbox = client.inboxes.create()
+        _default_inbox = inbox
+        _default_inbox_id = getattr(inbox, 'inbox_id', None) or getattr(inbox, 'id', None)
+        return _default_inbox_id
 
     except Exception:
         return None
+
+
+def _get_default_inbox():
+    """Get or create the agent's default inbox object (for backwards compatibility)."""
+    global _default_inbox
+
+    if _default_inbox is not None:
+        return _default_inbox
+
+    # This will populate _default_inbox as a side effect
+    _get_inbox_id()
+    return _default_inbox
 
 
 @tool(packages=["agentmail"], env=["AGENTMAIL_API_KEY"])
@@ -97,21 +133,14 @@ def get_agent_email() -> dict:
             "fix": "Get API key from https://agentmail.to and set AGENTMAIL_API_KEY environment variable"
         }
 
-    inbox = _get_default_inbox()
-    if not inbox:
-        return {"error": "Failed to get or create inbox"}
+    inbox_id = _get_inbox_id()
+    if not inbox_id:
+        return {"error": "Failed to get or create inbox. Set AGENTMAIL_INBOX_ID environment variable with your inbox email address."}
 
-    email_address = getattr(inbox, 'email', None) or getattr(inbox, 'address', None)
-    if not email_address:
-        # Try to construct from username and domain
-        username = getattr(inbox, 'username', None)
-        domain = getattr(inbox, 'domain', 'agentmail.to')
-        if username:
-            email_address = f"{username}@{domain}"
-
+    # inbox_id is the email address (e.g., 'name@agentmail.to')
     return {
-        "email": email_address,
-        "inbox_id": getattr(inbox, 'id', None)
+        "email": inbox_id,
+        "inbox_id": inbox_id
     }
 
 
@@ -139,23 +168,23 @@ def send_email(to: str, subject: str, body: str) -> dict:
             "fix": "Get API key from https://agentmail.to"
         }
 
-    inbox = _get_default_inbox()
-    if not inbox:
-        return {"error": "Failed to get inbox"}
+    inbox_id = _get_inbox_id()
+    if not inbox_id:
+        return {"error": "Failed to get inbox. Set AGENTMAIL_INBOX_ID environment variable with your inbox email address."}
 
     try:
-        inbox_id = getattr(inbox, 'id', inbox)
-        message = client.messages.send(
+        # Use client.inboxes.messages.send() with text parameter (not body)
+        message = client.inboxes.messages.send(
             inbox_id=inbox_id,
             to=to,
             subject=subject,
-            body=body
+            text=body
         )
         return {
             "sent": True,
             "to": to,
             "subject": subject,
-            "message_id": getattr(message, 'id', None)
+            "message_id": getattr(message, 'message_id', None) or getattr(message, 'id', None)
         }
     except Exception as e:
         return {"error": str(e)}
@@ -189,18 +218,20 @@ def check_inbox(limit: int = 10, unread_only: bool = True) -> dict:
             "fix": "Get API key from https://agentmail.to"
         }
 
-    inbox = _get_default_inbox()
-    if not inbox:
-        return {"error": "Failed to get inbox"}
+    inbox_id = _get_inbox_id()
+    if not inbox_id:
+        return {"error": "Failed to get inbox. Set AGENTMAIL_INBOX_ID environment variable with your inbox email address."}
 
     try:
-        inbox_id = getattr(inbox, 'id', inbox)
-        messages = client.messages.list(inbox_id=inbox_id, limit=limit)
+        # Use client.inboxes.messages.list()
+        messages_response = client.inboxes.messages.list(inbox_id=inbox_id)
+        # Handle both list response object and direct list
+        messages = getattr(messages_response, 'messages', None) or messages_response or []
 
         result = []
         for msg in messages:
             msg_data = {
-                "id": getattr(msg, 'id', None),
+                "id": getattr(msg, 'message_id', None) or getattr(msg, 'id', None),
                 "from": getattr(msg, 'from_', None) or getattr(msg, 'sender', None),
                 "subject": getattr(msg, 'subject', None),
                 "snippet": getattr(msg, 'snippet', None) or getattr(msg, 'preview', None),
@@ -214,9 +245,12 @@ def check_inbox(limit: int = 10, unread_only: bool = True) -> dict:
 
             result.append(msg_data)
 
+            if len(result) >= limit:
+                break
+
         return {
             "count": len(result),
-            "messages": result[:limit]
+            "messages": result
         }
     except Exception as e:
         return {"error": str(e)}
@@ -243,16 +277,16 @@ def read_email(message_id: str) -> dict:
             "error": "AGENTMAIL_API_KEY not set"
         }
 
-    inbox = _get_default_inbox()
-    if not inbox:
-        return {"error": "Failed to get inbox"}
+    inbox_id = _get_inbox_id()
+    if not inbox_id:
+        return {"error": "Failed to get inbox. Set AGENTMAIL_INBOX_ID environment variable with your inbox email address."}
 
     try:
-        inbox_id = getattr(inbox, 'id', inbox)
-        message = client.messages.get(inbox_id=inbox_id, message_id=message_id)
+        # Use client.inboxes.messages.get()
+        message = client.inboxes.messages.get(inbox_id=inbox_id, message_id=message_id)
 
         return {
-            "id": getattr(message, 'id', None),
+            "id": getattr(message, 'message_id', None) or getattr(message, 'id', None),
             "from": getattr(message, 'from_', None) or getattr(message, 'sender', None),
             "to": getattr(message, 'to', None),
             "subject": getattr(message, 'subject', None),
@@ -292,18 +326,19 @@ def wait_for_email(
     if not client:
         return {"error": "AGENTMAIL_API_KEY not set"}
 
-    inbox = _get_default_inbox()
-    if not inbox:
-        return {"error": "Failed to get inbox"}
+    inbox_id = _get_inbox_id()
+    if not inbox_id:
+        return {"error": "Failed to get inbox. Set AGENTMAIL_INBOX_ID environment variable with your inbox email address."}
 
     start_time = time.time()
     poll_interval = 3  # seconds
 
     try:
-        inbox_id = getattr(inbox, 'id', inbox)
-
         while time.time() - start_time < timeout_seconds:
-            messages = client.messages.list(inbox_id=inbox_id, limit=20)
+            # Use client.inboxes.messages.list()
+            messages_response = client.inboxes.messages.list(inbox_id=inbox_id)
+            # Handle both list response object and direct list
+            messages = getattr(messages_response, 'messages', None) or messages_response or []
 
             for msg in messages:
                 sender = getattr(msg, 'from_', '') or getattr(msg, 'sender', '') or ''
@@ -319,7 +354,7 @@ def wait_for_email(
                 return {
                     "found": True,
                     "message": {
-                        "id": getattr(msg, 'id', None),
+                        "id": getattr(msg, 'message_id', None) or getattr(msg, 'id', None),
                         "from": sender,
                         "subject": subject,
                         "snippet": getattr(msg, 'snippet', None)
