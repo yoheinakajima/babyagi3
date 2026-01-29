@@ -16,7 +16,7 @@ from tools import tool
 BROWSER_USE_API_URL = "https://api.browser-use.com/api/v2"
 
 
-@tool
+@tool(packages=["duckduckgo_search"])
 def web_search(query: str, max_results: int = 5) -> dict:
     """Search the web using DuckDuckGo.
 
@@ -53,7 +53,7 @@ def web_search(query: str, max_results: int = 5) -> dict:
         return {"error": str(e)}
 
 
-@tool
+@tool(packages=["httpx"], env=["BROWSER_USE_API_KEY"])
 def browse(task: str, url: str = None, max_steps: int = 25, agent=None) -> dict:
     """Control a browser to complete a task autonomously via Browser Use Cloud.
 
@@ -178,7 +178,7 @@ def browse(task: str, url: str = None, max_steps: int = 25, agent=None) -> dict:
         return {"error": str(e), "task": task}
 
 
-@tool
+@tool(packages=["httpx", "bs4"])
 def fetch_url(url: str, extract: str = None) -> dict:
     """Fetch a URL and optionally extract specific information.
 
@@ -226,7 +226,7 @@ def fetch_url(url: str, extract: str = None) -> dict:
         return {"error": str(e), "url": url}
 
 
-@tool
+@tool(packages=["httpx", "agentmail"], env=["BROWSER_USE_API_KEY", "AGENTMAIL_API_KEY"])
 def auto_signup(
     service_url: str,
     service_name: str,

@@ -86,7 +86,7 @@ def _check_secret(name: str) -> dict:
     }
 
 
-@tool
+@tool(packages=["keyring"])
 def get_secret(name: str) -> dict:
     """Retrieve a stored secret/API key.
 
@@ -100,7 +100,7 @@ def get_secret(name: str) -> dict:
     return _check_secret(name)
 
 
-@tool
+@tool(packages=["keyring"])
 def store_secret(name: str, value: str) -> dict:
     """Store a secret/API key securely.
 
@@ -153,7 +153,7 @@ def store_secret(name: str, value: str) -> dict:
         }
 
 
-@tool
+@tool(packages=["keyring"])
 def delete_secret(name: str) -> dict:
     """Delete a stored secret.
 
@@ -186,7 +186,7 @@ def delete_secret(name: str) -> dict:
     return {"deleted": False, "name": name, "message": "Secret not found"}
 
 
-@tool
+@tool  # No external deps - just checks environment
 def list_secrets() -> dict:
     """List all known secrets (with masked values).
 
@@ -216,7 +216,7 @@ def list_secrets() -> dict:
     }
 
 
-@tool
+@tool(packages=["keyring"])
 def request_api_key(
     name: str,
     service: str,
@@ -268,7 +268,7 @@ def request_api_key(
     return request
 
 
-@tool
+@tool(packages=["keyring"])
 def check_required_secrets(required: list) -> dict:
     """Check if all required secrets are available.
 

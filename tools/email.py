@@ -71,7 +71,7 @@ def _get_default_inbox():
         return None
 
 
-@tool
+@tool(packages=["agentmail"], env=["AGENTMAIL_API_KEY"])
 def get_agent_email() -> dict:
     """Get the agent's email address.
 
@@ -115,7 +115,7 @@ def get_agent_email() -> dict:
     }
 
 
-@tool
+@tool(packages=["agentmail"], env=["AGENTMAIL_API_KEY"])
 def send_email(to: str, subject: str, body: str) -> dict:
     """Send an email from the agent's email address.
 
@@ -161,7 +161,7 @@ def send_email(to: str, subject: str, body: str) -> dict:
         return {"error": str(e)}
 
 
-@tool
+@tool(packages=["agentmail"], env=["AGENTMAIL_API_KEY"])
 def check_inbox(limit: int = 10, unread_only: bool = True) -> dict:
     """Check the agent's email inbox for new messages.
 
@@ -222,7 +222,7 @@ def check_inbox(limit: int = 10, unread_only: bool = True) -> dict:
         return {"error": str(e)}
 
 
-@tool
+@tool(packages=["agentmail"], env=["AGENTMAIL_API_KEY"])
 def read_email(message_id: str) -> dict:
     """Read the full content of a specific email.
 
@@ -264,7 +264,7 @@ def read_email(message_id: str) -> dict:
         return {"error": str(e)}
 
 
-@tool
+@tool(packages=["agentmail"], env=["AGENTMAIL_API_KEY"])
 def wait_for_email(
     from_contains: str = None,
     subject_contains: str = None,

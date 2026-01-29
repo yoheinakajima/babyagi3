@@ -76,9 +76,19 @@ class Objective:
 class Tool:
     """A capability the agent can use."""
 
-    def __init__(self, name: str, description: str, parameters: dict, fn: Callable):
+    def __init__(
+        self,
+        name: str,
+        description: str,
+        parameters: dict,
+        fn: Callable,
+        packages: list[str] = None,
+        env: list[str] = None
+    ):
         self.name = name
         self.fn = fn
+        self.packages = packages or []
+        self.env = env or []
         self.schema = {
             "name": name,
             "description": description,
@@ -87,6 +97,20 @@ class Tool:
 
     def execute(self, params: dict, agent: "Agent"):
         return self.fn(params, agent)
+
+    def check_health(self) -> dict:
+        """
+        Check if this tool's requirements are satisfied.
+
+        Returns:
+            {
+                "ready": True/False,
+                "missing_packages": [...],
+                "missing_env": [...],
+            }
+        """
+        from tools import check_requirements
+        return check_requirements(self.packages, self.env)
 
 
 class Agent:
