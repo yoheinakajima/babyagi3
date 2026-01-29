@@ -76,9 +76,19 @@ class Objective:
 class Tool:
     """A capability the agent can use."""
 
-    def __init__(self, name: str, description: str, parameters: dict, fn: Callable):
+    def __init__(
+        self,
+        name: str,
+        description: str,
+        parameters: dict,
+        fn: Callable,
+        packages: list[str] = None,
+        env: list[str] = None
+    ):
         self.name = name
         self.fn = fn
+        self.packages = packages or []
+        self.env = env or []
         self.schema = {
             "name": name,
             "description": description,
@@ -87,6 +97,20 @@ class Tool:
 
     def execute(self, params: dict, agent: "Agent"):
         return self.fn(params, agent)
+
+    def check_health(self) -> dict:
+        """
+        Check if this tool's requirements are satisfied.
+
+        Returns:
+            {
+                "ready": True/False,
+                "missing_packages": [...],
+                "missing_env": [...],
+            }
+        """
+        from tools import check_requirements
+        return check_requirements(self.packages, self.env)
 
 
 class Agent:
@@ -681,15 +705,40 @@ are auto-detected and installed in a sandbox.""",
 
 async def main_async():
     """Async REPL with background objective support."""
-    print("Agent with Background Objectives")
+    print("BabyAGI v0.2.2")
     print("=" * 40)
-    print("Chat continues while objectives work in background.")
-    print("Type 'quit' to exit.\n")
 
     agent = Agent()
 
     # Start scheduler for recurring objectives
     scheduler_task = asyncio.create_task(agent.run_scheduler())
+
+    # Get tool health and generate AI greeting
+    try:
+        from tools import get_health_summary
+        health_summary = get_health_summary()
+    except Exception:
+        health_summary = "Core tools ready."
+
+    # Generate personalized greeting from the AI
+    greeting_prompt = f"""Generate a brief, friendly greeting (2-3 sentences max).
+
+Tool Status:
+{health_summary}
+
+Be concise. Mention what you can help with based on available tools. If any tools need setup, briefly note it. End with an invitation to chat."""
+
+    try:
+        greeting = await asyncio.to_thread(
+            agent.client.messages.create,
+            model=agent.model,
+            max_tokens=200,
+            messages=[{"role": "user", "content": greeting_prompt}]
+        )
+        greeting_text = "".join(b.text for b in greeting.content if hasattr(b, "text"))
+        print(f"\n{greeting_text}\n")
+    except Exception:
+        print("\nReady to assist. Type 'quit' to exit.\n")
 
     try:
         while True:

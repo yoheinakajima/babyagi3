@@ -44,17 +44,8 @@ def _mask_key(key: str) -> str:
     return f"{key[:4]}...{key[-4:]}"
 
 
-@tool
-def get_secret(name: str) -> dict:
-    """Retrieve a stored secret/API key.
-
-    Checks in order:
-    1. Environment variables (NAME as-is, or with _API_KEY suffix)
-    2. Keyring storage
-
-    Args:
-        name: Name of the secret (e.g., "SERPAPI", "GITHUB_TOKEN")
-    """
+def _check_secret(name: str) -> dict:
+    """Internal helper to check for a secret (used by multiple tools)."""
     # Normalize name
     name_upper = name.upper().replace("-", "_")
 
@@ -67,7 +58,6 @@ def get_secret(name: str) -> dict:
                 "name": name,
                 "source": "environment",
                 "masked_value": _mask_key(value),
-                # Don't return the actual value - tools should read from env directly
                 "env_var": env_name
             }
 
@@ -96,7 +86,21 @@ def get_secret(name: str) -> dict:
     }
 
 
-@tool
+@tool(packages=["keyring"])
+def get_secret(name: str) -> dict:
+    """Retrieve a stored secret/API key.
+
+    Checks in order:
+    1. Environment variables (NAME as-is, or with _API_KEY suffix)
+    2. Keyring storage
+
+    Args:
+        name: Name of the secret (e.g., "SERPAPI", "GITHUB_TOKEN")
+    """
+    return _check_secret(name)
+
+
+@tool(packages=["keyring"])
 def store_secret(name: str, value: str) -> dict:
     """Store a secret/API key securely.
 
@@ -149,7 +153,7 @@ def store_secret(name: str, value: str) -> dict:
         }
 
 
-@tool
+@tool(packages=["keyring"])
 def delete_secret(name: str) -> dict:
     """Delete a stored secret.
 
@@ -182,7 +186,7 @@ def delete_secret(name: str) -> dict:
     return {"deleted": False, "name": name, "message": "Secret not found"}
 
 
-@tool
+@tool  # No external deps - just checks environment
 def list_secrets() -> dict:
     """List all known secrets (with masked values).
 
@@ -212,7 +216,7 @@ def list_secrets() -> dict:
     }
 
 
-@tool
+@tool(packages=["keyring"])
 def request_api_key(
     name: str,
     service: str,
@@ -236,7 +240,7 @@ def request_api_key(
     name_upper = name.upper().replace("-", "_")
 
     # Check if we actually need it
-    existing = get_secret.__wrapped__(name)  # Call underlying function
+    existing = _check_secret(name)
     if existing.get("found"):
         return {
             "already_available": True,
@@ -264,7 +268,7 @@ def request_api_key(
     return request
 
 
-@tool
+@tool(packages=["keyring"])
 def check_required_secrets(required: list) -> dict:
     """Check if all required secrets are available.
 
@@ -280,7 +284,7 @@ def check_required_secrets(required: list) -> dict:
     }
 
     for name in required:
-        check = get_secret.__wrapped__(name)
+        check = _check_secret(name)
         if check.get("found"):
             results["available"].append(name)
         else:

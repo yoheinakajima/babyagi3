@@ -8,21 +8,24 @@ Usage:
 
     @tool
     def web_search(query: str, max_results: int = 5) -> dict:
-        '''Search the web.
-
-        Args:
-            query: What to search for
-            max_results: Number of results
-        '''
+        '''Search the web.'''
         return {"results": [...]}
+
+    # With requirements metadata:
+    @tool(packages=["httpx"], env=["BROWSER_USE_API_KEY"])
+    def browse(task: str) -> dict:
+        '''Browse the web.'''
+        ...
 
 The @tool decorator:
 - Generates JSON schema from type hints
 - Extracts descriptions from docstrings
+- Tracks package and environment variable requirements
 - Auto-registers when the module loads
 """
 
 import inspect
+import os
 import re
 from typing import Callable, get_type_hints
 
@@ -30,6 +33,53 @@ from typing import Callable, get_type_hints
 _Tool = None
 _registered_tools = []
 
+
+# =============================================================================
+# Health Check Utilities (Reusable)
+# =============================================================================
+
+def check_requirements(packages: list[str] = None, env: list[str] = None) -> dict:
+    """
+    Check if packages are importable and environment variables are set.
+
+    This is the core reusable health check function. Can be used by:
+    - The @tool decorator's generated health checks
+    - Dynamic tools created via register_tool
+    - Any code that needs to verify requirements
+
+    Args:
+        packages: List of package names to check (e.g., ["httpx", "bs4"])
+        env: List of environment variable names (e.g., ["API_KEY"])
+
+    Returns:
+        {
+            "ready": True/False,
+            "missing_packages": [...],
+            "missing_env": [...],
+        }
+    """
+    packages = packages or []
+    env = env or []
+
+    missing_packages = []
+    for pkg in packages:
+        try:
+            __import__(pkg)
+        except ImportError:
+            missing_packages.append(pkg)
+
+    missing_env = [var for var in env if not os.environ.get(var)]
+
+    return {
+        "ready": not missing_packages and not missing_env,
+        "missing_packages": missing_packages,
+        "missing_env": missing_env,
+    }
+
+
+# =============================================================================
+# Type Conversion and Parsing
+# =============================================================================
 
 def _python_type_to_json(py_type) -> dict:
     """Convert Python type hints to JSON schema types."""
@@ -101,7 +151,18 @@ def _parse_docstring(docstring: str) -> tuple[str, dict[str, str]]:
     return " ".join(description_lines), arg_descriptions
 
 
-def tool(fn: Callable = None, *, name: str = None, description: str = None):
+# =============================================================================
+# Tool Decorator
+# =============================================================================
+
+def tool(
+    fn: Callable = None,
+    *,
+    name: str = None,
+    description: str = None,
+    packages: list[str] = None,
+    env: list[str] = None
+):
     """
     Decorator to convert a function into a Tool.
 
@@ -110,8 +171,14 @@ def tool(fn: Callable = None, *, name: str = None, description: str = None):
         def my_func(...): ...
 
     Or with options:
-        @tool(name="custom_name", description="Custom description")
+        @tool(name="custom_name", packages=["requests"], env=["API_KEY"])
         def my_func(...): ...
+
+    Args:
+        name: Override the tool name (defaults to function name)
+        description: Override description (defaults to docstring)
+        packages: List of required package imports (e.g., ["httpx", "bs4"])
+        env: List of required environment variables (e.g., ["API_KEY"])
     """
     def decorator(func: Callable):
         tool_name = name or func.__name__
@@ -167,13 +234,16 @@ def tool(fn: Callable = None, *, name: str = None, description: str = None):
                 return func(agent=agent, **kwargs)
             return func(**kwargs)
 
-        # Store tool info for later registration
+        # Store tool info for later registration (including requirements)
         tool_info = {
             "name": tool_name,
             "description": tool_description,
             "parameters": schema,
             "fn": wrapper,
             "original_fn": func,
+            # Requirements metadata
+            "packages": packages or [],
+            "env": env or [],
         }
         _registered_tools.append(tool_info)
 
@@ -186,6 +256,10 @@ def tool(fn: Callable = None, *, name: str = None, description: str = None):
         return decorator(fn)
     return decorator
 
+
+# =============================================================================
+# Tool Registration and Discovery
+# =============================================================================
 
 def get_all_tools(tool_class):
     """
@@ -203,14 +277,135 @@ def get_all_tools(tool_class):
             name=info["name"],
             description=info["description"],
             parameters=info["parameters"],
-            fn=info["fn"]
+            fn=info["fn"],
+            packages=info.get("packages", []),
+            env=info.get("env", []),
         )
         tools.append(t)
 
     return tools
 
 
+def get_registered_tool_info() -> list[dict]:
+    """
+    Get metadata for all registered tools (without instantiating).
+
+    Useful for health checks before full initialization.
+    """
+    # Ensure tools are imported
+    try:
+        from tools import web, email, secrets
+    except ImportError:
+        pass
+
+    return _registered_tools.copy()
+
+
 def init_tools(tool_class):
     """Initialize the tools framework with the Tool class."""
     global _Tool
     _Tool = tool_class
+
+
+# =============================================================================
+# Health Check System
+# =============================================================================
+
+def check_tool_health(include_core: bool = True) -> dict:
+    """
+    Check the health/availability of all registered tools.
+
+    Reads requirements metadata from each tool's decorator.
+    Works with both static tools and dynamically registered ones.
+
+    Args:
+        include_core: Whether to include core tools (memory, objective, etc.)
+
+    Returns:
+        {
+            "ready": ["tool1", "tool2", ...],
+            "needs_setup": [{"name": "tool", "missing": ["VAR"], "reason": "api_keys"}],
+            "unavailable": [{"name": "tool", "missing": ["pkg"], "reason": "packages"}],
+            "summary": {"total_ready": N, "needs_api_keys": N, "needs_packages": N}
+        }
+    """
+    health = {
+        "ready": [],
+        "needs_setup": [],
+        "unavailable": [],
+    }
+
+    # Get all registered tools with their requirements
+    tool_infos = get_registered_tool_info()
+
+    for info in tool_infos:
+        tool_name = info["name"]
+        packages = info.get("packages", [])
+        env_vars = info.get("env", [])
+
+        # Use the reusable check_requirements function
+        status = check_requirements(packages, env_vars)
+
+        if status["missing_packages"]:
+            health["unavailable"].append({
+                "name": tool_name,
+                "missing": status["missing_packages"],
+                "reason": "packages"
+            })
+        elif status["missing_env"]:
+            health["needs_setup"].append({
+                "name": tool_name,
+                "missing": status["missing_env"],
+                "reason": "api_keys"
+            })
+        else:
+            health["ready"].append(tool_name)
+
+    # Add core tools (always available, no external deps)
+    if include_core:
+        core_tools = ["memory", "objective", "notes", "register_tool"]
+        health["ready"] = core_tools + health["ready"]
+
+        # Check E2B for sandbox capability
+        if os.environ.get("E2B_API_KEY"):
+            health["ready"].append("sandbox")
+        else:
+            health["needs_setup"].append({
+                "name": "sandbox",
+                "missing": ["E2B_API_KEY"],
+                "reason": "api_keys"
+            })
+
+    # Generate summary
+    health["summary"] = {
+        "total_ready": len(health["ready"]),
+        "needs_api_keys": len(health["needs_setup"]),
+        "needs_packages": len(health["unavailable"]),
+    }
+
+    return health
+
+
+def get_health_summary() -> str:
+    """
+    Get a concise human-readable health summary for the AI greeting.
+    """
+    health = check_tool_health()
+
+    lines = []
+
+    # Ready tools
+    if health["ready"]:
+        lines.append(f"Ready: {', '.join(health['ready'])}")
+
+    # Tools needing API keys
+    if health["needs_setup"]:
+        needs = [f"{t['name']}({','.join(t['missing'])})" for t in health["needs_setup"]]
+        lines.append(f"Need API keys: {', '.join(needs)}")
+
+    # Unavailable tools
+    if health["unavailable"]:
+        unavail = [f"{t['name']}({','.join(t['missing'])})" for t in health["unavailable"]]
+        lines.append(f"Missing packages: {', '.join(unavail)}")
+
+    return "\n".join(lines)
