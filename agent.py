@@ -22,6 +22,13 @@ from typing import Callable, Protocol, runtime_checkable
 import anthropic
 
 
+def json_serialize(obj):
+    """JSON serializer for objects not serializable by default."""
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
 # =============================================================================
 # Tool Validation
 # =============================================================================
@@ -268,7 +275,7 @@ class Agent:
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": block.id,
-                        "content": json.dumps(result)
+                        "content": json.dumps(result, default=json_serialize)
                     })
 
             thread.append({"role": "user", "content": tool_results})

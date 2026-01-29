@@ -16,7 +16,7 @@ from tools import tool
 BROWSER_USE_API_URL = "https://api.browser-use.com/api/v2"
 
 
-@tool(packages=["duckduckgo_search"])
+@tool(packages=["ddgs"])
 def web_search(query: str, max_results: int = 5) -> dict:
     """Search the web using DuckDuckGo.
 
@@ -28,11 +28,11 @@ def web_search(query: str, max_results: int = 5) -> dict:
         max_results: Maximum number of results to return (default 5)
     """
     try:
-        from duckduckgo_search import DDGS
+        from ddgs import DDGS
     except ImportError:
         return {
-            "error": "duckduckgo-search not installed",
-            "fix": "pip install duckduckgo-search"
+            "error": "ddgs not installed",
+            "fix": "pip install ddgs"
         }
 
     try:
