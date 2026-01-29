@@ -6,6 +6,7 @@ Uses AST to detect imports and installs them in the sandbox.
 """
 
 import ast
+import os
 
 # Lazy-loaded sandbox instance (reused across calls)
 _sandbox = None
@@ -77,7 +78,10 @@ def get_sandbox():
     global _sandbox
     if _sandbox is None:
         from e2b_code_interpreter import Sandbox
-        _sandbox = Sandbox()
+        api_key = os.getenv("E2B_API_KEY")
+        if not api_key:
+            raise RuntimeError("E2B_API_KEY environment variable is not set")
+        _sandbox = Sandbox(api_key=api_key)
     return _sandbox
 
 
