@@ -236,12 +236,13 @@ def check_tool_health() -> dict:
     }
 
     # Define tool requirements
+    # (tool_name, packages, env_vars)
+    # Note: browse uses Browser Use Cloud API (no local packages needed)
     tool_checks = [
-        # (tool_name, packages, env_vars)
         ("web_search", ["duckduckgo_search"], []),
         ("fetch_url", ["httpx", "bs4"], []),
-        ("browse", ["browser_use", "langchain_anthropic"], ["ANTHROPIC_API_KEY"]),
-        ("auto_signup", ["browser_use", "agentmail"], ["ANTHROPIC_API_KEY", "AGENTMAIL_API_KEY"]),
+        ("browse", ["httpx"], ["BROWSER_USE_API_KEY"]),
+        ("auto_signup", ["httpx", "agentmail"], ["BROWSER_USE_API_KEY", "AGENTMAIL_API_KEY"]),
         ("get_agent_email", ["agentmail"], ["AGENTMAIL_API_KEY"]),
         ("send_email", ["agentmail"], ["AGENTMAIL_API_KEY"]),
         ("check_inbox", ["agentmail"], ["AGENTMAIL_API_KEY"]),

@@ -4,13 +4,16 @@ Web Tools
 Provides web search and browser automation capabilities.
 
 - web_search: Quick DuckDuckGo search (no API key needed)
-- browse: Full browser automation via BrowserUse (can grab API keys!)
-
-Install dependencies:
-    pip install duckduckgo-search browser-use
+- browse: Full browser automation via Browser Use Cloud API
+- fetch_url: Simple URL fetching and parsing
 """
 
+import os
+import time
 from tools import tool
+
+# Browser Use Cloud API configuration
+BROWSER_USE_API_URL = "https://api.browser-use.com/api/v2"
 
 
 @tool
@@ -51,8 +54,8 @@ def web_search(query: str, max_results: int = 5) -> dict:
 
 
 @tool
-def browse(task: str, url: str = None, agent=None) -> dict:
-    """Control a browser to complete a task autonomously.
+def browse(task: str, url: str = None, max_steps: int = 25, agent=None) -> dict:
+    """Control a browser to complete a task autonomously via Browser Use Cloud.
 
     This is a powerful tool that can:
     - Navigate websites and fill forms
@@ -63,65 +66,116 @@ def browse(task: str, url: str = None, agent=None) -> dict:
     For API key retrieval, describe the task like:
     "Go to the API keys page, copy the API key shown"
 
+    Requires BROWSER_USE_API_KEY environment variable.
+    Get your key at: https://cloud.browser-use.com
+
     Args:
         task: Natural language description of what to do in the browser
-        url: Optional starting URL (can also be part of the task description)
+        url: Optional starting URL
+        max_steps: Maximum number of agent steps (default 25)
     """
-    try:
-        from browser_use import Agent as BrowserAgent, Browser, BrowserConfig
-        from langchain_anthropic import ChatAnthropic
-    except ImportError:
+    import httpx
+
+    api_key = os.environ.get("BROWSER_USE_API_KEY")
+    if not api_key:
         return {
-            "error": "browser-use not installed",
-            "fix": "pip install browser-use langchain-anthropic"
+            "error": "BROWSER_USE_API_KEY not set",
+            "fix": "Get your API key at https://cloud.browser-use.com and set BROWSER_USE_API_KEY"
         }
 
-    import asyncio
-    import os
+    headers = {
+        "X-Browser-Use-API-Key": api_key,
+        "Content-Type": "application/json"
+    }
 
-    # Check for Anthropic API key
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        return {"error": "ANTHROPIC_API_KEY environment variable required for browser automation"}
+    # Build request payload
+    payload = {
+        "task": task,
+        "maxSteps": max_steps,
+    }
+    if url:
+        payload["startUrl"] = url
 
     try:
-        # Build the full task
-        full_task = task
-        if url:
-            full_task = f"Go to {url} and {task}"
-
-        # Configure browser
-        browser_config = BrowserConfig(
-            headless=True,  # Run without GUI
-        )
-
-        # Use Claude for browser automation
-        llm = ChatAnthropic(model="claude-sonnet-4-20250514")
-
-        async def run_browser_task():
-            browser = Browser(config=browser_config)
-            browser_agent = BrowserAgent(
-                task=full_task,
-                llm=llm,
-                browser=browser,
+        # Create task
+        with httpx.Client(timeout=30) as client:
+            response = client.post(
+                f"{BROWSER_USE_API_URL}/tasks",
+                headers=headers,
+                json=payload
             )
-            result = await browser_agent.run()
-            await browser.close()
-            return result
 
-        # Run the async task
-        result = asyncio.run(run_browser_task())
+            if response.status_code not in (200, 201, 202):
+                return {
+                    "error": f"Failed to create task: {response.status_code}",
+                    "details": response.text
+                }
 
-        return {
-            "task": full_task,
-            "result": str(result),
-            "success": True
-        }
+            task_data = response.json()
+            task_id = task_data.get("id")
+            session_id = task_data.get("sessionId")
+
+            if not task_id:
+                return {"error": "No task ID returned", "response": task_data}
+
+            # Poll for completion (max 5 minutes)
+            max_wait = 300
+            poll_interval = 3
+            waited = 0
+
+            while waited < max_wait:
+                time.sleep(poll_interval)
+                waited += poll_interval
+
+                status_response = client.get(
+                    f"{BROWSER_USE_API_URL}/tasks/{task_id}",
+                    headers=headers
+                )
+
+                if status_response.status_code != 200:
+                    continue
+
+                status_data = status_response.json()
+                status = status_data.get("status", "").lower()
+
+                if status in ("finished", "completed", "done"):
+                    # Stop the session to save credits
+                    try:
+                        client.patch(
+                            f"{BROWSER_USE_API_URL}/sessions/{session_id}",
+                            headers=headers,
+                            json={"action": "stop"}
+                        )
+                    except Exception:
+                        pass
+
+                    return {
+                        "task": task,
+                        "status": "completed",
+                        "output": status_data.get("output"),
+                        "steps": status_data.get("steps", []),
+                        "success": True
+                    }
+
+                elif status in ("failed", "error"):
+                    return {
+                        "task": task,
+                        "status": "failed",
+                        "error": status_data.get("error") or status_data.get("output"),
+                        "success": False
+                    }
+
+            # Timeout
+            return {
+                "task": task,
+                "status": "timeout",
+                "error": f"Task did not complete within {max_wait} seconds",
+                "task_id": task_id,
+                "success": False
+            }
 
     except Exception as e:
-        return {
-            "error": str(e),
-            "task": task
-        }
+        return {"error": str(e), "task": task}
 
 
 @tool
@@ -183,6 +237,9 @@ def auto_signup(
     This is a high-level tool that combines browser automation with email
     verification to fully automate service signup and API key retrieval.
 
+    Uses Browser Use Cloud for browser automation.
+    Requires: BROWSER_USE_API_KEY, AGENTMAIL_API_KEY
+
     The process:
     1. Navigate to signup page
     2. Create account using agent's email
@@ -195,19 +252,34 @@ def auto_signup(
         service_url: The signup or main page URL of the service
         service_name: Name of the service (used for storing the API key)
     """
+    # Check required API keys
+    missing = []
+    if not os.environ.get("BROWSER_USE_API_KEY"):
+        missing.append("BROWSER_USE_API_KEY")
+    if not os.environ.get("AGENTMAIL_API_KEY"):
+        missing.append("AGENTMAIL_API_KEY")
+
+    if missing:
+        return {
+            "error": f"Missing required API keys: {', '.join(missing)}",
+            "fix": {
+                "BROWSER_USE_API_KEY": "https://cloud.browser-use.com",
+                "AGENTMAIL_API_KEY": "https://agentmail.to"
+            }
+        }
+
     # This is a meta-tool that orchestrates browse + email + secrets
     # The agent can call this, or do the steps manually for more control
-
     return {
         "status": "ready",
         "message": f"To sign up for {service_name}, I'll need to:",
         "steps": [
             f"1. Browse to {service_url} and find signup",
-            "2. Create account with agent email address",
-            "3. Check inbox for verification email",
-            "4. Complete email verification",
+            "2. Create account with agent email address (use get_agent_email)",
+            "3. Check inbox for verification email (use check_inbox/wait_for_email)",
+            "4. Complete email verification via browse()",
             "5. Navigate to API keys/dashboard section",
-            f"6. Extract and store API key as {service_name.upper()}_API_KEY"
+            f"6. Extract and store API key as {service_name.upper()}_API_KEY (use store_secret)"
         ],
-        "hint": "Use browse(), check_inbox(), and store_secret() to complete these steps"
+        "hint": "Use browse(), check_inbox(), wait_for_email(), and store_secret() to complete these steps"
     }

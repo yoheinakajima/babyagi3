@@ -681,7 +681,7 @@ are auto-detected and installed in a sandbox.""",
 
 async def main_async():
     """Async REPL with background objective support."""
-    print("BabyAGI v0.2.1")
+    print("BabyAGI v0.2.2")
     print("=" * 40)
 
     agent = Agent()

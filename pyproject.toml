@@ -1,6 +1,6 @@
 [project]
 name = "babyagi"
-version = "0.2.1"
+version = "0.2.2"
 description = "Minimal agent with background objectives and recurring tasks"
 requires-python = ">=3.12"
 dependencies = [
@@ -10,13 +10,10 @@ dependencies = [
     "fastapi>=0.115.0",
     "pydantic>=2.12.5",
     "uvicorn>=0.32.0",
-    # Web tools
+    # Web tools (httpx also used for Browser Use Cloud API)
     "duckduckgo-search>=7.0.0",
     "httpx>=0.27.0",
     "beautifulsoup4>=4.12.0",
-    # Browser automation
-    "browser-use>=0.1.40",
-    "langchain-anthropic>=0.3.0",
     # Email
     "agentmail>=0.1.0",
     # Secrets management
