@@ -437,6 +437,10 @@ class Scheduler:
         if not task:
             return {"error": f"Task {task_id} not found"}
 
+        # Check if already running
+        if task_id in self._running_tasks:
+            return {"status": "skipped", "reason": "already running"}
+
         if not force:
             # Check if due
             if task.next_run_at:
@@ -444,6 +448,8 @@ class Scheduler:
                 if next_run > datetime.now(timezone.utc):
                     return {"error": "Task not yet due", "next_run": task.next_run_at}
 
+        # Mark as running before execution
+        self._running_tasks.add(task_id)
         result = await self._execute_task(task)
         return result
 
@@ -486,6 +492,10 @@ class Scheduler:
                 if sleep_seconds > 0:
                     # Cap at 24 hours to handle clock changes
                     await asyncio.sleep(min(sleep_seconds, 86400))
+                else:
+                    # Critical: Even when tasks are immediately due, yield to the event loop
+                    # This prevents starvation of other coroutines (CLI input, API calls, etc.)
+                    await asyncio.sleep(0)
 
                 # Run all due tasks
                 await self._run_due_tasks()
@@ -529,14 +539,20 @@ class Scheduler:
                 if task.id in self._running_tasks:
                     continue
 
+                # Mark as running BEFORE spawning to prevent race condition
+                # (otherwise create_task returns immediately but _execute_task
+                # hasn't added to _running_tasks yet, causing duplicate spawns)
+                self._running_tasks.add(task.id)
+
                 # Execute in background
                 asyncio.create_task(self._execute_task(task))
 
     async def _execute_task(self, task: ScheduledTask) -> dict:
         """Execute a single task with tracking."""
-        async with self._lock:
-            if task.id in self._running_tasks:
-                return {"status": "skipped", "reason": "already running"}
+        # Task was already added to _running_tasks by _run_due_tasks() before spawning.
+        # This eliminates the race condition and removes the need for an async lock here.
+        # We still verify for edge cases (e.g., direct run_now() calls).
+        if task.id not in self._running_tasks:
             self._running_tasks.add(task.id)
 
         started_at = datetime.now(timezone.utc)
