@@ -1,0 +1,59 @@
+# BabyAGI Configuration
+# Environment variables can be used with ${VAR_NAME} or ${VAR_NAME:default}
+
+# Owner configuration
+owner:
+  id: "${OWNER_ID:owner}"
+  email: "${OWNER_EMAIL:}"
+  contacts:
+    email: "${OWNER_EMAIL:}"
+    # sms: "${OWNER_PHONE:}"
+    # whatsapp: "${OWNER_PHONE:}"
+
+# Channel configuration
+channels:
+  # CLI is always enabled
+  cli:
+    enabled: true
+
+  # Email via AgentMail
+  email:
+    enabled: true
+    poll_interval: 60  # seconds between inbox checks
+    api_key: "${AGENTMAIL_API_KEY:}"
+    inbox_id: "${AGENTMAIL_INBOX_ID:}"
+
+  # Voice (requires additional packages)
+  voice:
+    enabled: false
+    wake_word: "hey assistant"
+    stt_provider: "whisper"  # or "openai"
+    tts_provider: "pyttsx3"  # or "openai"
+    whisper_model: "base"  # tiny, base, small, medium, large
+    sample_rate: 16000
+    max_duration: 10  # max recording seconds
+
+  # SMS via Twilio (example - implement TwilioSender)
+  # sms:
+  #   enabled: false
+  #   provider: "twilio"
+  #   account_sid: "${TWILIO_ACCOUNT_SID:}"
+  #   auth_token: "${TWILIO_AUTH_TOKEN:}"
+  #   from_number: "${TWILIO_PHONE_NUMBER:}"
+
+  # WhatsApp (example - implement WhatsAppSender)
+  # whatsapp:
+  #   enabled: false
+  #   provider: "twilio"  # or "meta"
+  #   # ... provider-specific config
+
+  # Telegram (example - implement TelegramSender)
+  # telegram:
+  #   enabled: false
+  #   bot_token: "${TELEGRAM_BOT_TOKEN:}"
+  #   owner_chat_id: "${TELEGRAM_OWNER_CHAT_ID:}"
+
+# Agent settings
+agent:
+  model: "claude-sonnet-4-20250514"
+  # model: "claude-opus-4-20250514"  # For more complex tasks
