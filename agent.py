@@ -331,6 +331,12 @@ class Agent(EventEmitter):
 
     async def _execute_scheduled_task(self, task: ScheduledTask) -> str:
         """Execute a scheduled task - runs as the agent with its own thread."""
+        import logging
+        import traceback
+        logger = logging.getLogger(__name__)
+        
+        logger.info(f"[Scheduler] Starting task execution: {task.name} (id={task.id})")
+        
         # Emit task_start event
         self.emit("task_start", {
             "id": task.id,
@@ -348,7 +354,9 @@ Schedule: {task.schedule.human_readable()}
 Work autonomously. Use tools as needed. When done, provide a brief summary of what you accomplished."""
 
         try:
+            logger.info(f"[Scheduler] Calling run_async for task: {task.name}")
             result = await self.run_async(prompt, task.thread_id)
+            logger.info(f"[Scheduler] Task completed: {task.name}, result length: {len(result)}")
             duration_ms = int((time.time() - start_time) * 1000)
 
             # Emit task_end event (success)
@@ -361,6 +369,7 @@ Work autonomously. Use tools as needed. When done, provide a brief summary of wh
 
             return result
         except Exception as e:
+            logger.exception(f"[Scheduler] Task failed: {task.name}, error: {e}")
             duration_ms = int((time.time() - start_time) * 1000)
 
             # Emit task_end event (failure)
@@ -372,7 +381,8 @@ Work autonomously. Use tools as needed. When done, provide a brief summary of wh
                 "duration_ms": duration_ms
             })
 
-            raise
+            # Don't re-raise - let other tasks continue
+            return f"Task failed: {e}"
 
     def _load_external_tools(self):
         """Load tools from the tools/ folder."""
