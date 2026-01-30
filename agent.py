@@ -136,9 +136,14 @@ class Agent:
     │         │ Tools  │                      │
     │         └────────┘                      │
     └─────────────────────────────────────────┘
+
+    Multi-Channel Architecture:
+    - Listeners (input): Receive messages from CLI, email, voice, etc.
+    - Senders (output): Send messages via any channel
+    - Context: Each message carries channel info and owner status
     """
 
-    def __init__(self, model: str = "claude-sonnet-4-20250514", load_tools: bool = True):
+    def __init__(self, model: str = "claude-sonnet-4-20250514", load_tools: bool = True, config: dict = None):
         self.client = anthropic.Anthropic()
         self.model = model
         self.tools: dict[str, Tool] = {}
@@ -147,12 +152,26 @@ class Agent:
         self._running_objectives: set[str] = set()
         self._lock = asyncio.Lock()
 
+        # Multi-channel support
+        self.senders: dict[str, "Sender"] = {}  # Channel senders for output
+        self.config = config or {}  # Agent configuration
+        self._current_context: dict = {}  # Context for current message
+
         # Register core tools
         self._register_core_tools()
 
         # Load external tools
         if load_tools:
             self._load_external_tools()
+
+    def register_sender(self, channel: str, sender):
+        """Register a channel sender for outbound messages.
+
+        Args:
+            channel: Channel name (e.g., "email", "sms", "whatsapp")
+            sender: Sender instance implementing the Sender protocol
+        """
+        self.senders[channel] = sender
 
     def register(self, tool: Tool | ToolLike):
         """Register a tool with validation.
@@ -224,6 +243,7 @@ class Agent:
         self.register(_objective_tool(self))
         self.register(_notes_tool(self))
         self.register(_register_tool_tool(self))
+        self.register(_send_message_tool(self))
 
     def _load_external_tools(self):
         """Load tools from the tools/ folder."""
@@ -247,17 +267,34 @@ class Agent:
             self.run_async(user_input, thread_id)
         )
 
-    async def run_async(self, user_input: str, thread_id: str = "main") -> str:
-        """Process user input and return response. Objectives run in background."""
+    async def run_async(self, user_input: str, thread_id: str = "main", context: dict = None) -> str:
+        """Process user input and return response. Objectives run in background.
+
+        Args:
+            user_input: The message to process
+            thread_id: Conversation thread ID (e.g., "main", "email:123", "voice:session")
+            context: Channel context dict with:
+                - channel: Source channel ("cli", "email", "voice", etc.)
+                - is_owner: Whether message is from the agent's owner
+                - sender: Sender identifier (email address, phone, etc.)
+                - Additional channel-specific metadata
+        """
+        context = context or {"channel": "cli", "is_owner": True}
+        self._current_context = context
+
         thread = self.threads.setdefault(thread_id, [])
         thread.append({"role": "user", "content": user_input})
+
+        # Generate context-aware system prompt
+        is_owner = context.get("is_owner", True)
+        system_prompt = self._system_prompt(thread_id, is_owner, context)
 
         while True:
             response = await asyncio.to_thread(
                 self.client.messages.create,
                 model=self.model,
                 max_tokens=8096,
-                system=self._system_prompt(),
+                system=system_prompt,
                 tools=self._tool_schemas(),
                 messages=thread
             )
@@ -347,7 +384,16 @@ Work autonomously. Use tools as needed. When done, provide a final summary."""
     # Helpers
     # -------------------------------------------------------------------------
 
-    def _system_prompt(self) -> str:
+    def _system_prompt(self, thread_id: str = "main", is_owner: bool = True, context: dict = None) -> str:
+        """Generate context-aware system prompt.
+
+        Args:
+            thread_id: Current thread ID
+            is_owner: Whether message is from the agent's owner
+            context: Channel context with metadata
+        """
+        context = context or {}
+
         # Build objective status summary
         obj_summary = ""
         active = [o for o in self.objectives.values() if o.status in ("pending", "running")]
@@ -356,7 +402,12 @@ Work autonomously. Use tools as needed. When done, provide a final summary."""
                 f"- [{o.id[:8]}] {o.goal} ({o.status})" for o in active
             )
 
-        return f"""You are a helpful assistant with access to powerful tools.
+        # Build available channels info
+        channels_info = ""
+        if self.senders:
+            channels_info = f"\n\nAvailable output channels: {', '.join(self.senders.keys())}"
+
+        base_prompt = f"""You are a helpful assistant with access to powerful tools.
 
 CAPABILITIES:
 
@@ -374,15 +425,53 @@ CAPABILITIES:
 
 4. **Notes**: Simple reminders and todos (passive, unlike objectives).
 
-5. **Memory**: Store and recall facts.
+5. **Memory**: Store and recall facts across all conversations.
 
-6. **Register New Tools**: Extend your capabilities at runtime. You can import
+6. **Multi-Channel Communication**: Send messages via any configured channel
+   (email, SMS, etc.) using the send_message tool.
+
+7. **Register New Tools**: Extend your capabilities at runtime. You can import
    ANY Python package - they are auto-installed in a secure sandbox.
 
-7. **Web/Email/Secrets**: If configured, search web, browse pages, send emails.
-{obj_summary}
+8. **Web/Email/Secrets**: If configured, search web, browse pages, send emails.
+{obj_summary}{channels_info}"""
 
-Be proactive about using background objectives for complex work."""
+        # Add owner-specific or external-specific context
+        if is_owner:
+            channel = context.get("channel", "cli")
+            return base_prompt + f"""
+
+CURRENT CONTEXT:
+- Channel: {channel}
+- Thread: {thread_id}
+- Speaking with: Owner (full access)
+
+You are speaking with your owner. You have full access to:
+- Shared memory across all conversations
+- Ability to spawn background objectives
+- All configured communication channels
+- Full context about their preferences and history
+
+Be helpful, proactive, and casual. You know them well."""
+        else:
+            # External message (not from owner)
+            sender = context.get("sender", "unknown")
+            channel = context.get("channel", "unknown")
+
+            return base_prompt + f"""
+
+CURRENT CONTEXT:
+- Channel: {channel}
+- Thread: {thread_id}
+- Speaking with: {sender} (external - NOT your owner)
+
+You are responding to a message from {sender}, who is NOT your owner.
+- Be helpful and professional
+- Do NOT reveal private information about your owner
+- You CAN access your memory and knowledge to be helpful
+- If you need owner input, use the objective tool to consult them
+- You can say things like "Let me check with my owner" naturally
+- Use send_message to contact your owner if needed"""
 
     def _tool_schemas(self) -> list:
         return [t.schema for t in self.tools.values()]
@@ -701,6 +790,123 @@ are auto-detected and installed in a sandbox.""",
                 }
             },
             "required": ["code", "tool_var_name"]
+        },
+        fn=fn
+    )
+
+
+def _send_message_tool(agent: Agent) -> Tool:
+    """Send messages across any configured channel."""
+
+    def fn(params: dict, ag: Agent) -> dict:
+        import asyncio
+
+        channel = params["channel"]
+        to = params["to"]
+        content = params["content"]
+
+        # Check if channel is configured
+        if channel not in ag.senders:
+            available = list(ag.senders.keys()) if ag.senders else ["none configured"]
+            return {
+                "error": f"Channel '{channel}' not configured",
+                "available_channels": available
+            }
+
+        # Resolve "owner" to actual contact
+        if to == "owner":
+            owner_contacts = ag.config.get("owner", {}).get("contacts", {})
+            to = owner_contacts.get(channel)
+            if not to:
+                return {
+                    "error": f"No owner contact configured for {channel}",
+                    "hint": "Set owner.contacts in config"
+                }
+
+        # Get sender and validate capabilities
+        sender = ag.senders[channel]
+
+        # Check capability requirements
+        if params.get("attachments") and "attachments" not in getattr(sender, 'capabilities', []):
+            return {"error": f"{channel} doesn't support attachments"}
+        if params.get("image") and "images" not in getattr(sender, 'capabilities', []):
+            return {"error": f"{channel} doesn't support images"}
+
+        # Build kwargs from optional params
+        kwargs = {}
+        for key in ["subject", "attachments", "image", "reply_to"]:
+            if params.get(key):
+                kwargs[key] = params[key]
+
+        # Send asynchronously
+        async def do_send():
+            return await sender.send(to, content, **kwargs)
+
+        try:
+            # Try to get running loop, otherwise create one
+            try:
+                loop = asyncio.get_running_loop()
+                # We're in an async context, create a task
+                future = asyncio.ensure_future(do_send())
+                # This is tricky - we can't await here directly
+                # For now, use run_coroutine_threadsafe or similar
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as pool:
+                    result = pool.submit(asyncio.run, do_send()).result()
+                return result
+            except RuntimeError:
+                # No running loop, we can use asyncio.run
+                return asyncio.run(do_send())
+        except Exception as e:
+            return {"error": str(e)}
+
+    return Tool(
+        name="send_message",
+        description="""Send a message via any configured channel.
+
+Use this to communicate across channels - email, SMS, WhatsApp, etc.
+Use to="owner" to message your owner on that channel.
+
+Examples:
+- send_message(channel="email", to="alice@example.com", subject="Hi", content="Hello!")
+- send_message(channel="email", to="owner", content="Task complete!")
+- send_message(channel="sms", to="owner", content="Urgent: need your input")
+
+Note: Channels must be configured in the agent. Check available_channels in error responses.""",
+        parameters={
+            "type": "object",
+            "properties": {
+                "channel": {
+                    "type": "string",
+                    "description": "Channel to send via (email, sms, whatsapp, etc.)"
+                },
+                "to": {
+                    "type": "string",
+                    "description": "Recipient identifier or 'owner'"
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Message content"
+                },
+                "subject": {
+                    "type": "string",
+                    "description": "Email subject (email only)"
+                },
+                "attachments": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Attachment URLs (if supported)"
+                },
+                "image": {
+                    "type": "string",
+                    "description": "Image URL (WhatsApp/Telegram)"
+                },
+                "reply_to": {
+                    "type": "string",
+                    "description": "Message ID to reply to"
+                }
+            },
+            "required": ["channel", "to", "content"]
         },
         fn=fn
     )

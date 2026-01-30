@@ -12,20 +12,69 @@ Tool execution    → message
 Memory retrieval  → message
 Task state        → message
 Background work   → message
+Channel input     → message
 ```
 
 This means the entire system reduces to: **a loop that processes messages and decides what to do next.**
 
-## What's New in v0.2.0
+## What's New in v0.3.0
+
+- **Multi-Channel Architecture** — Receive messages from CLI, email, voice, and more
+- **Unified Communication** — Send messages via any channel with `send_message` tool
+- **Owner vs External** — Context-aware responses based on message source
+- **YAML Configuration** — Easy channel setup with environment variable substitution
+- **Extensible Channels** — Add new channels by implementing simple listener/sender patterns
+
+### Previous (v0.2.0)
 
 - **Background Objectives** — Async work that runs while chat continues
 - **Recurring Tasks** — Schedule objectives hourly, daily, or custom intervals
 - **e2b Sandbox** — Safe code execution for dynamically created tools
-- **Tool Validation** — Prevents malformed tool registrations
 - **External Tools** — Web search, browser automation, email, secrets management
 - **API Server** — FastAPI server mode with full REST API
 
 ## Architecture
+
+### Multi-Channel Design
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    INPUT: Listeners                              │
+│         (Diverse - each channel is different)                    │
+│                                                                  │
+│   CLI              Email             Voice            Future...  │
+│   - Terminal       - Poll inbox      - Wake word      - SMS      │
+│   - Always on      - Auto-reply      - STT/TTS        - WhatsApp │
+│                                                                  │
+│         All call: agent.run_async(content, context={...})       │
+└──────────────────────────────┬──────────────────────────────────┘
+                               │
+                               ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                          AGENT                                   │
+│                                                                  │
+│   Threads     Memory     Objectives     Tools                    │
+│      │          │            │            │                      │
+│      └──────────┴────────────┴────────────┘                      │
+│                         │                                        │
+│            ┌────────────┴────────────┐                           │
+│            │    send_message tool    │                           │
+│            └────────────┬────────────┘                           │
+└─────────────────────────┼───────────────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    OUTPUT: Senders                               │
+│            (Unified - one tool, many channels)                   │
+│                                                                  │
+│   send_message(channel="email", to="owner", content="Done!")    │
+│   send_message(channel="sms", to="+1...", content="Alert!")     │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Key insight:** Input and output are separate concerns.
+- **Listeners** are diverse (polling, webhooks, streaming) — no forced interface
+- **Senders** are unified via `send_message` tool — agent uses same tool for any channel
 
 ### The Minimal Loop
 
@@ -132,28 +181,45 @@ pip install browser-use langchain-anthropic
 ### Interactive CLI
 
 ```bash
-python agent.py
-# or
-python main.py
+python main.py          # Run CLI only (default)
+python main.py cli      # Explicit CLI mode
 ```
 
 ```
-BabyAGI Agent
+BabyAGI v0.3.0
 ========================================
-Everything is a message. Type 'quit' to exit.
 
 You: Hello, remember that my favorite color is blue.
 Assistant: I've stored that your favorite color is blue.
 
 You: What's my favorite color?
 Assistant: Your favorite color is blue.
-
-You: Add a task: review the Q1 report
-Assistant: I've added the task "review the Q1 report" to your list.
-
-You: Research the latest AI papers and summarize them for me
-Assistant: I'll start that as a background objective. You can continue chatting while I work on it.
 ```
+
+### Multi-Channel Mode
+
+Run all enabled channels concurrently:
+
+```bash
+python main.py channels
+```
+
+```
+BabyAGI v0.3.0 - Multi-Channel Mode
+========================================
+
+Active channels: cli, email
+Press Ctrl+C to stop
+
+You: Research X and email me the results when done
+Assistant: I'll start that as a background objective and email you when complete.
+```
+
+The agent can now:
+- Receive your CLI input
+- Monitor your email inbox
+- Respond to emails automatically
+- Send you messages on any channel
 
 ### API Server
 
@@ -346,6 +412,63 @@ agent.run("What API keys do I have stored?")
 agent.run("Use my GitHub token to check my repositories")
 ```
 
+### Send Message Tool
+
+Send messages across any configured channel:
+
+```python
+# The agent can use send_message to communicate on any channel
+agent.run("Send me an email when the research is done")
+agent.run("Text me if there's an urgent issue")
+
+# Cross-channel examples:
+# - Receive email → respond via email AND text you
+# - Background task completes → email results to you
+# - External person emails → consult with you via CLI
+```
+
+## Configuration
+
+BabyAGI uses a `config.yaml` file with environment variable substitution.
+
+### Basic Configuration
+
+```yaml
+# config.yaml
+owner:
+  id: "your-name"
+  email: "${OWNER_EMAIL}"
+  contacts:
+    email: "${OWNER_EMAIL}"
+    # sms: "${OWNER_PHONE}"
+
+channels:
+  cli:
+    enabled: true
+
+  email:
+    enabled: true
+    poll_interval: 60
+
+  voice:
+    enabled: false
+    wake_word: "hey assistant"
+```
+
+### Environment Variables
+
+```bash
+# Required
+export ANTHROPIC_API_KEY="your-anthropic-key"
+
+# For email channel
+export AGENTMAIL_API_KEY="your-agentmail-key"
+export OWNER_EMAIL="you@example.com"
+
+# Optional
+export AGENTMAIL_INBOX_ID="your-inbox-id"
+```
+
 ## API Server Endpoints
 
 When running in server mode (`python main.py serve`), the following endpoints are available:
@@ -401,6 +524,70 @@ curl http://localhost:8000/health
 ```
 
 ## Extending the System
+
+### Adding a New Channel
+
+To add a new channel (e.g., Telegram), create a listener and sender:
+
+**1. Create Listener** (`listeners/telegram.py`):
+
+```python
+async def run_telegram_listener(agent, config: dict = None):
+    """Listen for Telegram messages."""
+    bot = TelegramBot(config["token"])
+
+    async for update in bot.get_updates():
+        is_owner = update.from_user.id == config["owner_id"]
+
+        response = await agent.run_async(
+            content=update.message.text,
+            thread_id=f"telegram:{update.chat.id}",
+            context={
+                "channel": "telegram",
+                "is_owner": is_owner,
+                "chat_id": update.chat.id,
+            }
+        )
+
+        # Auto-reply for owner
+        if is_owner and response:
+            await bot.send_message(update.chat.id, response)
+```
+
+**2. Create Sender** (`senders/telegram.py`):
+
+```python
+class TelegramSender:
+    name = "telegram"
+    capabilities = ["images", "documents"]
+
+    def __init__(self, token: str):
+        self.bot = TelegramBot(token)
+
+    async def send(self, to: str, content: str, **kwargs) -> dict:
+        await self.bot.send_message(to, content)
+        return {"sent": True, "channel": "telegram"}
+```
+
+**3. Register in `main.py`**:
+
+```python
+if is_channel_enabled(config, "telegram"):
+    agent.register_sender("telegram", TelegramSender(config["token"]))
+    tasks.append(run_telegram_listener(agent, config))
+```
+
+**4. Add to config**:
+
+```yaml
+channels:
+  telegram:
+    enabled: true
+    token: "${TELEGRAM_BOT_TOKEN}"
+    owner_id: 123456789
+```
+
+**Total: ~80 lines for a new channel.**
 
 ### Adding Custom Tools (Class-based)
 
@@ -490,25 +677,38 @@ Swap the in-memory lists for a database:
 
 ### The Entire System
 
-~200 lines of core code. Everything else is tools.
+~300 lines of core code. Everything else is tools and channels.
 
 ```
 agent.py
 ├── Tool class (dataclass)
-├── Agent class (main loop)
+├── Agent class (main loop + channel support)
 ├── Objective class (background work)
-├── Core tools (memory, tasks, objectives, notes, register)
-└── CLI interface
+├── Core tools (memory, objectives, notes, register, send_message)
+└── Sender registration
+
+listeners/
+├── __init__.py
+├── cli.py (terminal input)
+├── email.py (inbox polling)
+└── voice.py (speech input)
+
+senders/
+├── __init__.py (Sender protocol)
+├── cli.py (terminal output)
+└── email.py (AgentMail output)
 
 tools/
 ├── __init__.py (decorator framework)
 ├── sandbox.py (e2b code execution)
 ├── web.py (search, browse, fetch)
-├── email.py (AgentMail integration)
+├── email.py (AgentMail tools)
 └── secrets.py (secure key storage)
 
+config.py (YAML loader)
+config.yaml (channel configuration)
 server.py (FastAPI endpoints)
-main.py (entry point)
+main.py (orchestration)
 ```
 
 ## Advanced Patterns
@@ -604,12 +804,20 @@ class Agent:
     def __init__(
         self,
         model: str = "claude-sonnet-4-20250514",
-        load_tools: bool = True
+        load_tools: bool = True,
+        config: dict = None  # Channel/owner configuration
     )
     def register(self, tool: Tool | ToolLike) -> None
-    def run(self, user_input: str, thread_id: str = "default") -> str
-    def get_thread(self, thread_id: str = "default") -> list
-    def clear_thread(self, thread_id: str = "default") -> None
+    def register_sender(self, channel: str, sender: Sender) -> None
+    def run(self, user_input: str, thread_id: str = "main") -> str
+    async def run_async(
+        self,
+        user_input: str,
+        thread_id: str = "main",
+        context: dict = None  # Channel context (is_owner, sender, etc.)
+    ) -> str
+    def get_thread(self, thread_id: str = "main") -> list
+    def clear_thread(self, thread_id: str = "main") -> None
 ```
 
 ### Tool
@@ -667,6 +875,13 @@ def another_function(x: float) -> float:
 - fastapi >= 0.115.0
 - pydantic >= 2.12.5
 - uvicorn >= 0.32.0
+- pyyaml >= 6.0 (for config loading)
+
+### Optional (for channels)
+
+- agentmail (email channel)
+- sounddevice, numpy, openai-whisper (voice input)
+- pyttsx3 or openai (voice output)
 
 ## Philosophy
 
