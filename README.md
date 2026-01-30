@@ -21,6 +21,8 @@ This means the entire system reduces to: **a loop that processes messages and de
 
 - **Multi-Channel Architecture** — Receive messages from CLI, email, voice, and more
 - **Full-Featured Scheduler** — Cron expressions, intervals, one-time tasks with persistence
+- **Styled CLI Output** — Color-coded messages (user/agent/system) with verbose modes
+- **Event System** — UI-ready event emitter for tool calls, objectives, and tasks
 - **Unified Communication** — Send messages via any channel with `send_message` tool
 - **Owner vs External** — Context-aware responses based on message source
 - **YAML Configuration** — Easy channel setup with environment variable substitution
@@ -211,6 +213,57 @@ Assistant: I've stored that your favorite color is blue.
 
 You: What's my favorite color?
 Assistant: Your favorite color is blue.
+```
+
+### Styled Output & Verbose Mode
+
+The CLI features color-coded output for better readability:
+- **User messages**: Green
+- **Agent responses**: Cyan
+- **System messages**: Blue
+- **Verbose/debug**: Yellow (light) / Gray (deep)
+
+**Verbose Levels:**
+
+| Level | Shows |
+|-------|-------|
+| `off` | Only user/agent messages (default) |
+| `light` | Key operations: tool names, task starts, objective status |
+| `deep` | Everything: tool inputs/outputs, timing, full details |
+
+**Enable verbose output:**
+
+```bash
+# Environment variable
+BABYAGI_VERBOSE=light python main.py
+
+# Or in config.yaml
+verbose: light  # off, light, or deep
+```
+
+**Runtime toggle:**
+
+```
+You: /verbose light
+Verbose output: light (key operations)
+
+You: What's in my memory?
+  [tool] memory
+  [tool] memory done (12ms)
+Assistant: You have 3 memories stored...
+
+You: /verbose deep
+Verbose output: deep (everything)
+
+You: Store that I like coffee
+  [tool] memory
+    input: {action="store", content="User likes coffee"}
+  [tool] memory done (8ms)
+    result: {stored=true}
+Assistant: I've stored that you like coffee.
+
+You: /verbose off
+Verbose output: off
 ```
 
 ### Multi-Channel Mode
@@ -498,6 +551,9 @@ owner:
     email: "${OWNER_EMAIL}"
     # sms: "${OWNER_PHONE}"
 
+# Verbose output: off, light, or deep (can also use BABYAGI_VERBOSE env var)
+verbose: off
+
 channels:
   cli:
     enabled: true
@@ -674,6 +730,80 @@ channels:
 
 **Total: ~80 lines for a new channel.**
 
+### Building a UI (Event System)
+
+The agent emits events for all key operations, making it easy to build UIs or logging systems:
+
+**Available Events:**
+- `tool_start` — Tool execution starting: `{name, input}`
+- `tool_end` — Tool execution completed: `{name, result, duration_ms}`
+- `objective_start` — Background objective starting: `{id, goal}`
+- `objective_end` — Background objective completed: `{id, status, result}`
+- `task_start` — Scheduled task starting: `{id, name, goal}`
+- `task_end` — Scheduled task completed: `{id, status, duration_ms}`
+
+**Example: WebSocket UI**
+
+```python
+from agent import Agent
+
+class WebSocketUI:
+    def __init__(self, agent: Agent, websocket):
+        self.ws = websocket
+
+        # Subscribe to agent events
+        agent.on("tool_start", self.on_tool_start)
+        agent.on("tool_end", self.on_tool_end)
+        agent.on("objective_start", self.on_objective)
+        agent.on("*", self.on_any)  # Wildcard: all events
+
+    async def on_tool_start(self, event):
+        await self.ws.send_json({
+            "type": "tool_start",
+            "tool": event["name"],
+            "input": event.get("input")
+        })
+
+    async def on_tool_end(self, event):
+        await self.ws.send_json({
+            "type": "tool_end",
+            "tool": event["name"],
+            "duration_ms": event.get("duration_ms")
+        })
+
+    async def on_objective(self, event):
+        await self.ws.send_json({
+            "type": "objective",
+            "id": event["id"],
+            "goal": event["goal"]
+        })
+
+    async def on_any(self, event):
+        # Log all events
+        print(f"Event: {event.get('_event')}")
+```
+
+**Example: File Logger**
+
+```python
+import json
+from datetime import datetime
+
+def setup_file_logger(agent: Agent, log_path: str):
+    def log_event(event):
+        with open(log_path, "a") as f:
+            entry = {
+                "timestamp": datetime.now().isoformat(),
+                "event": event.get("_event"),
+                "data": {k: v for k, v in event.items() if k != "_event"}
+            }
+            f.write(json.dumps(entry) + "\n")
+
+    agent.on("*", log_event)
+```
+
+The CLI's verbose output is itself just an event subscriber—see `listeners/cli.py` for the reference implementation.
+
 ### Adding Custom Tools (Class-based)
 
 ```python
@@ -803,7 +933,7 @@ summary = get_health_summary()
 ```
 agent.py
 ├── Tool class (tool definition with health checks)
-├── Agent class (main loop + channel support)
+├── Agent class (main loop + channel support + EventEmitter)
 ├── Objective class (background work)
 ├── Core tools (memory, objectives, notes, schedule, register, send_message)
 └── Sender registration
@@ -814,15 +944,20 @@ scheduler.py
 ├── SchedulerStore class (JSON persistence)
 └── Scheduler class (execution engine)
 
+utils/
+├── __init__.py
+├── events.py (EventEmitter mixin for decoupled event handling)
+└── console.py (styled terminal output with verbose levels)
+
 listeners/
 ├── __init__.py
-├── cli.py (terminal input)
+├── cli.py (terminal input + event subscriptions for verbose output)
 ├── email.py (inbox polling)
 └── voice.py (speech input)
 
 senders/
 ├── __init__.py (Sender protocol)
-├── cli.py (terminal output)
+├── cli.py (styled terminal output)
 └── email.py (AgentMail output)
 
 tools/
@@ -835,7 +970,7 @@ tools/
 config.py (YAML loader with env substitution)
 config.yaml (channel configuration)
 server.py (FastAPI endpoints)
-main.py (orchestration)
+main.py (orchestration + verbose config)
 ```
 
 ## Advanced Patterns
@@ -930,7 +1065,7 @@ You don't need a complex knowledge graph. **The LLM is the organizer.** Give it 
 ### Agent
 
 ```python
-class Agent:
+class Agent(EventEmitter):
     def __init__(
         self,
         model: str = "claude-sonnet-4-20250514",
@@ -949,6 +1084,12 @@ class Agent:
     async def run_scheduler(self) -> None  # Start the scheduler loop
     def get_thread(self, thread_id: str = "main") -> list
     def clear_thread(self, thread_id: str = "main") -> None
+
+    # Event methods (inherited from EventEmitter)
+    def on(self, event: str, handler: Callable) -> Callable  # Subscribe
+    def off(self, event: str, handler: Callable = None) -> None  # Unsubscribe
+    def emit(self, event: str, data: dict = None) -> None  # Emit event
+    def once(self, event: str, handler: Callable) -> Callable  # One-time subscription
 ```
 
 ### Tool
@@ -1038,6 +1179,58 @@ def api_call(endpoint: str) -> dict:
 @tool(name="custom_name", description="Custom description")
 def another_function(x: float) -> float:
     return x * 2
+```
+
+### EventEmitter
+
+```python
+from utils.events import EventEmitter
+
+class EventEmitter:
+    """Mixin class for event-driven communication."""
+
+    def on(self, event: str, handler: Callable) -> Callable
+        """Subscribe to an event. Use "*" for all events."""
+
+    def off(self, event: str, handler: Callable = None) -> None
+        """Unsubscribe. If handler is None, removes all handlers for event."""
+
+    def emit(self, event: str, data: dict = None) -> None
+        """Emit event to all subscribers. data["_event"] is set automatically."""
+
+    def once(self, event: str, handler: Callable) -> Callable
+        """Subscribe for a single emission only."""
+```
+
+### Console
+
+```python
+from utils.console import console, VerboseLevel
+
+# Message output
+console.banner("Title", width=40)  # Styled header
+console.user("message")            # Green user message
+console.agent("message")           # Cyan agent response
+console.system("message")          # Blue system info
+console.success("message")         # Green success
+console.warning("message")         # Yellow warning
+console.error("message")           # Red error
+
+# Verbose output (only shown if level is enabled)
+console.verbose("message", level=VerboseLevel.LIGHT)
+console.verbose("detailed info", level=VerboseLevel.DEEP)
+
+# Verbose level control
+console.set_verbose("light")       # "off", "light", "deep"
+console.get_verbose()              # Returns VerboseLevel enum
+
+# Convenience methods for event logging
+console.tool_start("memory", {"action": "store"})
+console.tool_end("memory", {"stored": True}, duration_ms=12)
+console.objective_start("abc123", "Research AI trends")
+console.objective_end("abc123", "completed")
+console.task_start("task1", "Daily summary")
+console.task_end("task1", "ok", duration_ms=5000)
 ```
 
 ## Requirements
