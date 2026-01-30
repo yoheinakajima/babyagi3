@@ -47,3 +47,6 @@ secrets.json
 # OS
 .DS_Store
 Thumbs.db
+
+# Replit
+attaches_assets/
