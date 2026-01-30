@@ -16,10 +16,15 @@ import asyncio
 import json
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Callable, Protocol, runtime_checkable
 
 import anthropic
+
+from scheduler import (
+    Scheduler, ScheduledTask, Schedule, SchedulerStore,
+    create_task, parse_schedule, RunRecord
+)
 
 
 def json_serialize(obj):
@@ -157,6 +162,9 @@ class Agent:
         self.config = config or {}  # Agent configuration
         self._current_context: dict = {}  # Context for current message
 
+        # Scheduler for recurring and one-time tasks
+        self.scheduler = Scheduler(executor=self._execute_scheduled_task)
+
         # Register core tools
         self._register_core_tools()
 
@@ -242,8 +250,21 @@ class Agent:
         self.register(_memory_tool(self))
         self.register(_objective_tool(self))
         self.register(_notes_tool(self))
+        self.register(_schedule_tool(self))
         self.register(_register_tool_tool(self))
         self.register(_send_message_tool(self))
+
+    async def _execute_scheduled_task(self, task: ScheduledTask) -> str:
+        """Execute a scheduled task - runs as the agent with its own thread."""
+        prompt = f"""Execute this scheduled task: {task.goal}
+
+Task: {task.name}
+Schedule: {task.schedule.human_readable()}
+
+Work autonomously. Use tools as needed. When done, provide a brief summary of what you accomplished."""
+
+        result = await self.run_async(prompt, task.thread_id)
+        return result
 
     def _load_external_tools(self):
         """Load tools from the tools/ folder."""
@@ -350,35 +371,8 @@ Work autonomously. Use tools as needed. When done, provide a final summary."""
     # -------------------------------------------------------------------------
 
     async def run_scheduler(self):
-        """Run the scheduler loop for recurring objectives."""
-        while True:
-            now = datetime.now()
-            for obj in list(self.objectives.values()):
-                if obj.schedule and obj.status in ("pending", "completed"):
-                    if self._should_run(obj.schedule, now):
-                        # Reset and re-run
-                        obj.status = "pending"
-                        obj.result = None
-                        obj.completed = None
-                        asyncio.create_task(self.run_objective(obj.id))
-            await asyncio.sleep(60)  # Check every minute
-
-    def _should_run(self, schedule: str, now: datetime) -> bool:
-        """Simple schedule matching: 'hourly', 'daily', or cron-like."""
-        if schedule == "hourly":
-            return now.minute == 0
-        elif schedule == "daily":
-            return now.hour == 0 and now.minute == 0
-        elif schedule.startswith("every "):
-            # "every 5 minutes", "every 2 hours"
-            parts = schedule.split()
-            if len(parts) == 3:
-                n, unit = int(parts[1]), parts[2]
-                if "minute" in unit:
-                    return now.minute % n == 0
-                elif "hour" in unit:
-                    return now.hour % n == 0 and now.minute == 0
-        return False
+        """Run the unified scheduler loop."""
+        await self.scheduler.start()
 
     # -------------------------------------------------------------------------
     # Helpers
@@ -407,34 +401,52 @@ Work autonomously. Use tools as needed. When done, provide a final summary."""
         if self.senders:
             channels_info = f"\n\nAvailable output channels: {', '.join(self.senders.keys())}"
 
+        # Build scheduled tasks summary
+        scheduled_summary = ""
+        scheduled_tasks = self.scheduler.list()
+        if scheduled_tasks:
+            scheduled_summary = "\n\nScheduled tasks:\n" + "\n".join(
+                f"- [{t.id}] {t.name}: {t.schedule.human_readable()} (next: {t.next_run_at[:16] if t.next_run_at else 'none'})"
+                for t in scheduled_tasks[:5]
+            )
+
         base_prompt = f"""You are a helpful assistant with access to powerful tools.
 
 CAPABILITIES:
 
 1. **Direct Response**: Answer questions and have conversations normally.
 
-2. **Background Objectives**: For tasks that take time (research, multi-step work),
-   use the 'objective' tool to spawn background work. Chat can continue while
-   objectives run. Use this when:
-   - The task is complex or multi-step
-   - The user might want to do other things while waiting
-   - You say things like "I'll work on that" or "Let me research that"
+2. **Background Objectives**: For immediate complex tasks, use the 'objective' tool.
+   Chat continues while objectives work in the background.
 
-3. **Recurring Tasks**: Objectives can have a schedule ('hourly', 'daily',
-   'every 5 minutes') for recurring work.
+3. **Scheduling**: Use the 'schedule' tool for time-based automation:
+   - **One-time**: "in 5m", "in 2h", "at 2024-01-15T09:00"
+   - **Recurring**: "every 5m", "every 2h", "daily at 9:00", "weekdays at 9am"
+   - **Cron**: Full cron expressions like "0 9 * * 1-5" (9am weekdays)
 
-4. **Notes**: Simple reminders and todos (passive, unlike objectives).
+4. **Notes**: Simple reminders and todos (passive tracking).
 
 5. **Memory**: Store and recall facts across all conversations.
 
-6. **Multi-Channel Communication**: Send messages via any configured channel
-   (email, SMS, etc.) using the send_message tool.
+6. **Multi-Channel Communication**: Send messages via email, SMS, etc.
 
-7. **Register New Tools**: Extend your capabilities at runtime. You can import
-   ANY Python package - they are auto-installed in a secure sandbox.
+7. **Register New Tools**: Extend capabilities at runtime with Python code.
+{obj_summary}{scheduled_summary}{channels_info}
 
-8. **Web/Email/Secrets**: If configured, search web, browse pages, send emails.
-{obj_summary}{channels_info}"""
+WHEN TO USE SCHEDULING:
+
+Use the 'schedule' tool when the user wants something to happen:
+- At a specific future time: "remind me at 3pm" → schedule(at="15:00")
+- Repeatedly: "check my email every hour" → schedule(every="1h")
+- On a pattern: "send me a summary every weekday at 9am" → schedule(cron)
+
+Use 'objective' for immediate background work without a time component.
+
+SCHEDULE EXAMPLES:
+- "Remind me in 30 minutes" → schedule add, spec="in 30m"
+- "Check server status every 5 minutes" → schedule add, spec="every 5m"
+- "Send daily standup at 9am" → schedule add, spec="daily at 9:00"
+- "Run report on weekdays at 6pm EST" → schedule add, spec={{"kind":"cron","cron":"0 18 * * 1-5","tz":"America/New_York"}}"""
 
         # Add owner-specific or external-specific context
         if is_owner:
@@ -600,6 +612,219 @@ Use spawn for complex/time-consuming tasks. The objective runs in background whi
                 "goal": {"type": "string", "description": "What to accomplish (for spawn)"},
                 "schedule": {"type": "string", "description": "Recurring schedule (for spawn)"},
                 "id": {"type": "string", "description": "Objective ID (for check/cancel)"}
+            },
+            "required": ["action"]
+        },
+        fn=fn
+    )
+
+
+def _schedule_tool(agent: Agent) -> Tool:
+    """Schedule: time-based task automation with full cron support."""
+
+    def fn(params: dict, ag: Agent) -> dict:
+        action = params["action"]
+
+        if action == "add":
+            name = params.get("name", "Scheduled task")
+            goal = params["goal"]
+            spec = params["spec"]
+
+            try:
+                # Parse schedule specification
+                if isinstance(spec, str):
+                    schedule = parse_schedule(spec)
+                else:
+                    schedule = Schedule(**spec)
+
+                task = ScheduledTask(
+                    id=str(uuid.uuid4())[:8],
+                    name=name,
+                    goal=goal,
+                    schedule=schedule
+                )
+                ag.scheduler.add(task)
+
+                return {
+                    "scheduled": task.id,
+                    "name": task.name,
+                    "goal": task.goal,
+                    "schedule": task.schedule.human_readable(),
+                    "next_run": task.next_run_at,
+                    "message": f"Task scheduled: {task.schedule.human_readable()}"
+                }
+            except Exception as e:
+                return {"error": f"Invalid schedule: {e}"}
+
+        elif action == "list":
+            include_disabled = params.get("include_disabled", False)
+            tasks = ag.scheduler.list(include_disabled=include_disabled)
+            return {"tasks": [
+                {
+                    "id": t.id,
+                    "name": t.name,
+                    "goal": t.goal[:100],
+                    "schedule": t.schedule.human_readable(),
+                    "next_run": t.next_run_at,
+                    "last_status": t.last_status,
+                    "run_count": t.run_count,
+                    "enabled": t.enabled
+                }
+                for t in tasks
+            ]}
+
+        elif action == "get":
+            task_id = params["id"]
+            task = ag.scheduler.get(task_id)
+            if not task:
+                return {"error": f"Task {task_id} not found"}
+            return {
+                "id": task.id,
+                "name": task.name,
+                "goal": task.goal,
+                "schedule": task.schedule.human_readable(),
+                "next_run": task.next_run_at,
+                "last_run": task.last_run_at,
+                "last_status": task.last_status,
+                "last_error": task.last_error,
+                "run_count": task.run_count,
+                "enabled": task.enabled
+            }
+
+        elif action == "update":
+            task_id = params["id"]
+            updates = {}
+            if "name" in params:
+                updates["name"] = params["name"]
+            if "goal" in params:
+                updates["goal"] = params["goal"]
+            if "enabled" in params:
+                updates["enabled"] = params["enabled"]
+            if "spec" in params:
+                spec = params["spec"]
+                if isinstance(spec, str):
+                    updates["schedule"] = parse_schedule(spec)
+                else:
+                    updates["schedule"] = Schedule(**spec)
+
+            task = ag.scheduler.update(task_id, **updates)
+            if not task:
+                return {"error": f"Task {task_id} not found"}
+            return {
+                "updated": task.id,
+                "schedule": task.schedule.human_readable(),
+                "next_run": task.next_run_at
+            }
+
+        elif action == "remove":
+            task_id = params["id"]
+            if ag.scheduler.remove(task_id):
+                return {"removed": task_id}
+            return {"error": f"Task {task_id} not found"}
+
+        elif action == "run":
+            task_id = params["id"]
+            force = params.get("force", True)
+
+            async def do_run():
+                return await ag.scheduler.run_now(task_id, force=force)
+
+            try:
+                loop = asyncio.get_running_loop()
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as pool:
+                    result = pool.submit(asyncio.run, do_run()).result()
+                return result
+            except RuntimeError:
+                return asyncio.run(do_run())
+
+        elif action == "history":
+            task_id = params["id"]
+            limit = params.get("limit", 10)
+            runs = ag.scheduler.get_runs(task_id, limit=limit)
+            return {"runs": [
+                {
+                    "started_at": r.started_at,
+                    "status": r.status,
+                    "duration_ms": r.duration_ms,
+                    "result": r.result[:200] if r.result else None,
+                    "error": r.error
+                }
+                for r in runs
+            ]}
+
+        return {"error": f"Unknown action: {action}"}
+
+    return Tool(
+        name="schedule",
+        description="""Schedule tasks to run at specific times or intervals.
+
+ACTIONS:
+- add: Create scheduled task (name, goal, spec)
+- list: View all scheduled tasks
+- get: Get task details (id)
+- update: Modify task (id, name?, goal?, spec?, enabled?)
+- remove: Delete task (id)
+- run: Execute task now (id, force=True)
+- history: View execution history (id, limit=10)
+
+SCHEDULE SPEC (string shortcuts):
+- "in 5m" or "in 2h" → one-time, relative
+- "every 5m" or "every 1h" → recurring interval
+- "daily at 9:00" → daily at specific time
+- "weekdays at 9am" → weekdays only
+- "hourly" or "daily" → simple patterns
+- "0 9 * * 1-5" → raw cron expression
+
+SCHEDULE SPEC (full control):
+{"kind": "at", "at": "2024-01-15T09:00:00", "tz": "America/New_York"}
+{"kind": "every", "every": "5m"}
+{"kind": "cron", "cron": "0 9 * * 1-5", "tz": "America/New_York"}
+
+WHEN TO USE:
+- User wants reminder: "in 30m", "at 3pm"
+- User wants recurring check: "every 5m", "hourly"
+- User wants daily/weekly automation: "daily at 9:00", "weekdays at 9am"
+
+Tasks persist across restarts and run autonomously.""",
+        parameters={
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["add", "list", "get", "update", "remove", "run", "history"]
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Human-readable task name"
+                },
+                "goal": {
+                    "type": "string",
+                    "description": "What to accomplish when task runs"
+                },
+                "spec": {
+                    "description": "Schedule: string shortcut or {kind, at/every/cron, tz}"
+                },
+                "id": {
+                    "type": "string",
+                    "description": "Task ID for get/update/remove/run/history"
+                },
+                "enabled": {
+                    "type": "boolean",
+                    "description": "Enable/disable task (for update)"
+                },
+                "force": {
+                    "type": "boolean",
+                    "description": "Force run even if not due (for run)"
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max history entries to return"
+                },
+                "include_disabled": {
+                    "type": "boolean",
+                    "description": "Include disabled tasks in list"
+                }
             },
             "required": ["action"]
         },
