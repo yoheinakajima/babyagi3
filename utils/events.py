@@ -43,23 +43,35 @@ class EventEmitter:
         if not hasattr(self, '_event_handlers'):
             self._event_handlers: dict[str, list[Callable]] = {}
 
-    def on(self, event: str, handler: Callable[[dict[str, Any]], None]) -> Callable:
+    def on(self, event: str, handler: Callable[[dict[str, Any]], None] = None) -> Callable:
         """
         Subscribe to an event.
 
         Args:
             event: Event name (e.g., "tool_start") or "*" for all events
-            handler: Callback function that receives event data dict
+            handler: Callback function that receives event data dict (optional for decorator use)
 
         Returns:
-            The handler (for chaining or later removal)
+            The handler (for chaining or later removal), or a decorator if handler is None
 
         Example:
             agent.on("tool_start", lambda e: print(f"Tool: {e['name']}"))
+            
+            # Or as a decorator:
+            @agent.on("tool_start")
+            def handle_tool_start(e):
+                print(f"Tool: {e['name']}")
         """
         self.__init_events__()
         if event not in self._event_handlers:
             self._event_handlers[event] = []
+        
+        if handler is None:
+            def decorator(fn: Callable[[dict[str, Any]], None]) -> Callable:
+                self._event_handlers[event].append(fn)
+                return fn
+            return decorator
+        
         self._event_handlers[event].append(handler)
         return handler
 

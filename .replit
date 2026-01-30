@@ -4,7 +4,7 @@ expertMode = true
 
 [nix]
 channel = "stable-25_05"
-packages = ["libxcrypt"]
+packages = ["libxcrypt", "libyaml"]
 
 [workflows]
 runButton = "Project"
@@ -22,9 +22,9 @@ args = "Unified Message Agent"
 name = "Unified Message Agent"
 author = "agent"
 
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "python agent.py"
-
 [workflows.workflow.metadata]
 outputType = "console"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python main.py"
