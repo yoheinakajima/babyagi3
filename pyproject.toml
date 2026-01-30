@@ -20,6 +20,8 @@ dependencies = [
     "keyring>=25.0.0",
     "keyrings-cryptfile>=1.3.9",
     "ddgs>=9.10.0",
+    # Scheduler (optional but recommended for full cron support)
+    "croniter>=2.0.0",
 ]
 
 [project.scripts]
