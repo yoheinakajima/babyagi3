@@ -219,7 +219,7 @@ class Agent(EventEmitter):
     def __init__(self, model: str = "claude-sonnet-4-20250514", load_tools: bool = True, config: dict = None):
         self.__init_events__()  # Initialize event system
 
-        self.client = anthropic.Anthropic()
+        self.client = anthropic.AsyncAnthropic()
         self.model = model
         self.tools: dict[str, Tool] = {}
         self.threads: dict[str, list] = {"main": []}
@@ -447,8 +447,7 @@ Work autonomously. Use tools as needed. When done, provide a brief summary of wh
             system_prompt = self._system_prompt(thread_id, is_owner, context)
 
             while True:
-                response = await asyncio.to_thread(
-                    self.client.messages.create,
+                response = await self.client.messages.create(
                     model=self.model,
                     max_tokens=8096,
                     system=system_prompt,
@@ -1342,8 +1341,7 @@ Tool Status:
 Be concise. Mention what you can help with based on available tools. If any tools need setup, briefly note it. End with an invitation to chat."""
 
     try:
-        greeting = await asyncio.to_thread(
-            agent.client.messages.create,
+        greeting = await agent.client.messages.create(
             model=agent.model,
             max_tokens=200,
             messages=[{"role": "user", "content": greeting_prompt}]

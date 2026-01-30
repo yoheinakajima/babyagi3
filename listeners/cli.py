@@ -80,8 +80,7 @@ Be concise. Mention what you can help with based on available tools. If any tool
 
     try:
         logger.info("Generating greeting...")
-        greeting = await asyncio.to_thread(
-            agent.client.messages.create,
+        greeting = await agent.client.messages.create(
             model=agent.model,
             max_tokens=200,
             messages=[{"role": "user", "content": greeting_prompt}]
