@@ -84,6 +84,7 @@ from scheduler import (
     create_task, parse_schedule, RunRecord
 )
 from utils.events import EventEmitter
+from utils.console import console, VerboseLevel
 
 
 def json_serialize(obj):
@@ -606,6 +607,10 @@ SCHEDULE EXAMPLES:
 - "Send daily standup at 9am" → schedule add, spec="daily at 9:00"
 - "Run report on weekdays at 6pm EST" → schedule add, spec={{"kind":"cron","cron":"0 18 * * 1-5","tz":"America/New_York"}}"""
 
+        # Get verbose status
+        verbose_level = console.get_verbose()
+        verbose_info = f"- Verbose: {verbose_level.name.lower()} (use set_verbose tool to change)"
+
         # Add owner-specific or external-specific context
         if is_owner:
             channel = context.get("channel", "cli")
@@ -614,6 +619,7 @@ SCHEDULE EXAMPLES:
 CURRENT CONTEXT:
 - Channel: {channel}
 - Thread: {thread_id}
+{verbose_info}
 - Speaking with: Owner (full access)
 
 You are speaking with your owner. You have full access to:
@@ -633,6 +639,7 @@ Be helpful, proactive, and casual. You know them well."""
 CURRENT CONTEXT:
 - Channel: {channel}
 - Thread: {thread_id}
+{verbose_info}
 - Speaking with: {sender} (external - NOT your owner)
 
 You are responding to a message from {sender}, who is NOT your owner.
