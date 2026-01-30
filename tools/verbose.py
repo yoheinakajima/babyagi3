@@ -1,12 +1,14 @@
 """
 Verbose Mode Control Tool
 
-Allows the agent to control and query the verbose output level at runtime.
+Allows the agent to control verbose output level at runtime.
 
 Verbose Levels:
     - OFF (0): No verbose output, just user/agent messages
     - LIGHT (1): Key operations only (tool names, task starts)
     - DEEP (2): Everything (tool inputs/outputs, full details)
+
+Note: Current verbose level is shown in the system prompt context.
 """
 
 from tools import tool
@@ -28,7 +30,6 @@ def set_verbose(level: str) -> dict:
     """
     level_lower = level.lower()
 
-    # Validate input
     valid_levels = {
         "off": VerboseLevel.OFF,
         "0": VerboseLevel.OFF,
@@ -43,8 +44,7 @@ def set_verbose(level: str) -> dict:
     if level_lower not in valid_levels:
         return {
             "success": False,
-            "error": f"Invalid level '{level}'. Valid options: off, light, deep (or 0, 1, 2)",
-            "current_level": console.get_verbose().name.lower()
+            "error": f"Invalid level '{level}'. Valid options: off, light, deep (or 0, 1, 2)"
         }
 
     console.set_verbose(valid_levels[level_lower])
@@ -52,37 +52,5 @@ def set_verbose(level: str) -> dict:
 
     return {
         "success": True,
-        "level": new_level.name.lower(),
-        "level_value": int(new_level),
-        "description": _level_description(new_level)
+        "level": new_level.name.lower()
     }
-
-
-@tool
-def get_verbose() -> dict:
-    """Get the current verbose output level.
-
-    Returns the current verbose setting and what it means.
-    """
-    current = console.get_verbose()
-
-    return {
-        "level": current.name.lower(),
-        "level_value": int(current),
-        "description": _level_description(current),
-        "available_levels": [
-            {"name": "off", "value": 0, "description": "No verbose output"},
-            {"name": "light", "value": 1, "description": "Key operations only"},
-            {"name": "deep", "value": 2, "description": "Full details"},
-        ]
-    }
-
-
-def _level_description(level: VerboseLevel) -> str:
-    """Get a human-readable description of a verbose level."""
-    descriptions = {
-        VerboseLevel.OFF: "No verbose output - only user and agent messages shown",
-        VerboseLevel.LIGHT: "Light verbose - shows tool names and task starts",
-        VerboseLevel.DEEP: "Deep verbose - shows all details including inputs/outputs",
-    }
-    return descriptions.get(level, "Unknown level")
