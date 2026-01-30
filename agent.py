@@ -14,12 +14,69 @@ Chat continues while objectives work. Objectives can spawn sub-objectives.
 
 import asyncio
 import json
+import threading
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, Protocol, runtime_checkable
 
 import anthropic
+
+
+# =============================================================================
+# Thread-Safe Collections
+# =============================================================================
+
+class ThreadSafeList:
+    """Thread-safe list wrapper for concurrent access.
+
+    Provides safe iteration (via copy) and atomic operations.
+    Used for global shared state like MEMORIES and NOTES.
+    """
+
+    def __init__(self):
+        self._list: list = []
+        self._lock = threading.Lock()
+
+    def append(self, item):
+        """Thread-safe append."""
+        with self._lock:
+            self._list.append(item)
+
+    def pop(self, index: int = -1):
+        """Thread-safe pop."""
+        with self._lock:
+            return self._list.pop(index)
+
+    def __getitem__(self, index):
+        """Thread-safe index access."""
+        with self._lock:
+            return self._list[index]
+
+    def __setitem__(self, index, value):
+        """Thread-safe index assignment."""
+        with self._lock:
+            self._list[index] = value
+
+    def __len__(self):
+        """Thread-safe length."""
+        with self._lock:
+            return len(self._list)
+
+    def __iter__(self):
+        """Return iterator over a copy (safe for concurrent modification)."""
+        with self._lock:
+            return iter(self._list.copy())
+
+    def copy(self) -> list:
+        """Return a copy of the list."""
+        with self._lock:
+            return self._list.copy()
+
+    def __bool__(self):
+        """Thread-safe bool check."""
+        with self._lock:
+            return bool(self._list)
 
 from scheduler import (
     Scheduler, ScheduledTask, Schedule, SchedulerStore,
@@ -157,6 +214,11 @@ class Agent:
         self._running_objectives: set[str] = set()
         self._lock = asyncio.Lock()
 
+        # Per-thread locks for serializing operations on same thread_id
+        # Prevents race conditions when multiple sources (scheduler, email, etc.)
+        # access the same conversation thread concurrently
+        self._thread_locks: dict[str, asyncio.Lock] = {}
+
         # Multi-channel support
         self.senders: dict[str, "Sender"] = {}  # Channel senders for output
         self.config = config or {}  # Agent configuration
@@ -288,6 +350,17 @@ Work autonomously. Use tools as needed. When done, provide a brief summary of wh
             self.run_async(user_input, thread_id)
         )
 
+    def _get_thread_lock(self, thread_id: str) -> asyncio.Lock:
+        """Get or create a lock for a thread_id.
+
+        Ensures serialized access to each conversation thread,
+        preventing race conditions when multiple sources (scheduler,
+        email, CLI) access the same thread concurrently.
+        """
+        if thread_id not in self._thread_locks:
+            self._thread_locks[thread_id] = asyncio.Lock()
+        return self._thread_locks[thread_id]
+
     async def run_async(self, user_input: str, thread_id: str = "main", context: dict = None) -> str:
         """Process user input and return response. Objectives run in background.
 
@@ -299,44 +372,51 @@ Work autonomously. Use tools as needed. When done, provide a brief summary of wh
                 - is_owner: Whether message is from the agent's owner
                 - sender: Sender identifier (email address, phone, etc.)
                 - Additional channel-specific metadata
+
+        Thread Safety:
+            Operations on each thread_id are serialized via per-thread locks.
+            This prevents message interleaving when concurrent requests
+            (e.g., scheduled task + email) target the same thread.
         """
-        context = context or {"channel": "cli", "is_owner": True}
-        self._current_context = context
+        # Acquire per-thread lock to serialize operations on this thread
+        async with self._get_thread_lock(thread_id):
+            context = context or {"channel": "cli", "is_owner": True}
+            self._current_context = context
 
-        thread = self.threads.setdefault(thread_id, [])
-        thread.append({"role": "user", "content": user_input})
+            thread = self.threads.setdefault(thread_id, [])
+            thread.append({"role": "user", "content": user_input})
 
-        # Generate context-aware system prompt
-        is_owner = context.get("is_owner", True)
-        system_prompt = self._system_prompt(thread_id, is_owner, context)
+            # Generate context-aware system prompt
+            is_owner = context.get("is_owner", True)
+            system_prompt = self._system_prompt(thread_id, is_owner, context)
 
-        while True:
-            response = await asyncio.to_thread(
-                self.client.messages.create,
-                model=self.model,
-                max_tokens=8096,
-                system=system_prompt,
-                tools=self._tool_schemas(),
-                messages=thread
-            )
+            while True:
+                response = await asyncio.to_thread(
+                    self.client.messages.create,
+                    model=self.model,
+                    max_tokens=8096,
+                    system=system_prompt,
+                    tools=self._tool_schemas(),
+                    messages=thread
+                )
 
-            thread.append({"role": "assistant", "content": response.content})
+                thread.append({"role": "assistant", "content": response.content})
 
-            if response.stop_reason == "end_turn":
-                return self._extract_text(response)
+                if response.stop_reason == "end_turn":
+                    return self._extract_text(response)
 
-            # Execute tools
-            tool_results = []
-            for block in response.content:
-                if block.type == "tool_use":
-                    result = self.tools[block.name].execute(block.input, self)
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": json.dumps(result, default=json_serialize)
-                    })
+                # Execute tools
+                tool_results = []
+                for block in response.content:
+                    if block.type == "tool_use":
+                        result = self.tools[block.name].execute(block.input, self)
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": json.dumps(result, default=json_serialize)
+                        })
 
-            thread.append({"role": "user", "content": tool_results})
+                thread.append({"role": "user", "content": tool_results})
 
     async def run_objective(self, objective_id: str):
         """Execute an objective in the background."""
@@ -502,9 +582,9 @@ You are responding to a message from {sender}, who is NOT your owner.
 # Core Tools
 # =============================================================================
 
-# Shared storage
-MEMORIES: list[dict] = []
-NOTES: list[dict] = []
+# Shared storage (thread-safe for concurrent access)
+MEMORIES: ThreadSafeList = ThreadSafeList()
+NOTES: ThreadSafeList = ThreadSafeList()
 
 
 def _memory_tool(agent: Agent) -> Tool:
@@ -849,7 +929,7 @@ def _notes_tool(agent: Agent) -> Tool:
             return {"added": note}
 
         elif action == "list":
-            return {"notes": NOTES}
+            return {"notes": NOTES.copy()}
 
         elif action == "complete":
             note_id = params["id"]
