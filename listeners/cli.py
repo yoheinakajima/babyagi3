@@ -79,28 +79,20 @@ Tool Status:
 Be concise. Mention what you can help with based on available tools. If any tools need setup, briefly note it. End with an invitation to chat."""
 
     try:
-        logger.info("Generating greeting...")
         greeting = await agent.client.messages.create(
             model=agent.model,
             max_tokens=200,
             messages=[{"role": "user", "content": greeting_prompt}]
         )
-        logger.info(f"API response received, content blocks: {len(greeting.content)}")
         greeting_text = "".join(b.text for b in greeting.content if hasattr(b, "text"))
-        logger.info(f"Greeting extracted ({len(greeting_text)} chars): {greeting_text[:100]}...")
         console.system(f"\n{greeting_text}\n")
-        logger.info("Greeting printed to console")
     except Exception as e:
         logger.exception(f"Greeting generation failed: {e}")
         console.system("\nReady to assist. Type 'quit' to exit.\n")
     
     # Start scheduler AFTER greeting is displayed (so it doesn't block startup)
     if start_scheduler:
-        logger.info("Starting scheduler...")
         scheduler_task = asyncio.create_task(agent.run_scheduler())
-        logger.info("Scheduler started in background")
-    
-    logger.info("Entering REPL loop, displaying You: prompt")
 
     # Main REPL loop
     while True:
@@ -108,11 +100,8 @@ Be concise. Mention what you can help with based on available tools. If any tool
             # Print prompt to stderr for immediate visibility in workflow console
             import sys
             print(console.user_prompt(), end="", file=sys.stderr, flush=True)
-            logger.debug("Waiting for input...")
             user_input = await asyncio.to_thread(input)
-            logger.info(f"Raw input received: '{user_input}'")
             user_input = user_input.strip()
-            logger.info(f"Stripped input: '{user_input}'")
 
             # Check for verbose toggle commands
             if user_input.lower().startswith("/verbose"):
@@ -127,7 +116,6 @@ Be concise. Mention what you can help with based on available tools. If any tool
                 continue
 
             # Process through agent with CLI context
-            logger.info(f"Processing user input: {user_input[:50]}...")
             try:
                 response = await agent.run_async(
                     user_input,
@@ -137,7 +125,6 @@ Be concise. Mention what you can help with based on available tools. If any tool
                         "is_owner": True,
                     }
                 )
-                logger.info(f"Got response from agent ({len(response)} chars)")
                 console.agent(response)
             except Exception as e:
                 logger.exception(f"Error processing message: {e}")
