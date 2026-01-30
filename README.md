@@ -20,15 +20,16 @@ This means the entire system reduces to: **a loop that processes messages and de
 ## What's New in v0.3.0
 
 - **Multi-Channel Architecture** — Receive messages from CLI, email, voice, and more
+- **Full-Featured Scheduler** — Cron expressions, intervals, one-time tasks with persistence
 - **Unified Communication** — Send messages via any channel with `send_message` tool
 - **Owner vs External** — Context-aware responses based on message source
 - **YAML Configuration** — Easy channel setup with environment variable substitution
+- **Tool Health System** — Automatic detection of available tools and missing dependencies
 - **Extensible Channels** — Add new channels by implementing simple listener/sender patterns
 
 ### Previous (v0.2.0)
 
 - **Background Objectives** — Async work that runs while chat continues
-- **Recurring Tasks** — Schedule objectives hourly, daily, or custom intervals
 - **e2b Sandbox** — Safe code execution for dynamically created tools
 - **External Tools** — Web search, browser automation, email, secrets management
 - **API Server** — FastAPI server mode with full REST API
@@ -53,16 +54,16 @@ This means the entire system reduces to: **a loop that processes messages and de
 ┌─────────────────────────────────────────────────────────────────┐
 │                          AGENT                                   │
 │                                                                  │
-│   Threads     Memory     Objectives     Tools                    │
-│      │          │            │            │                      │
-│      └──────────┴────────────┴────────────┘                      │
-│                         │                                        │
-│            ┌────────────┴────────────┐                           │
-│            │    send_message tool    │                           │
-│            └────────────┬────────────┘                           │
-└─────────────────────────┼───────────────────────────────────────┘
-                          │
-                          ▼
+│   Threads     Memory     Objectives     Scheduler     Tools      │
+│      │          │            │              │           │        │
+│      └──────────┴────────────┴──────────────┴───────────┘        │
+│                              │                                   │
+│               ┌──────────────┴──────────────┐                    │
+│               │     send_message tool       │                    │
+│               └──────────────┬──────────────┘                    │
+└──────────────────────────────┼───────────────────────────────────┘
+                               │
+                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                    OUTPUT: Senders                               │
 │            (Unified - one tool, many channels)                   │
@@ -90,32 +91,19 @@ This means the entire system reduces to: **a loop that processes messages and de
         ┌────────────┼────────────┐
         ↓            ↓            ↓
     ┌───────┐   ┌────────┐   ┌────────┐
-    │ Tools │   │ Memory │   │ Tasks  │
+    │ Tools │   │ Memory │   │Schedule│
     └───────┘   └────────┘   └────────┘
 ```
 
-**The insight:** Tools, Memory, and Tasks are all just Tools.
+**The insight:** Tools, Memory, Scheduling, and Notes are all just Tools.
 - Memory is a tool that reads/writes to storage
-- Tasks is a tool that manages a list
+- Notes is a tool that manages a simple todo list
 - Objectives is a tool that spawns background work
-- This collapses to:
-
-```
-┌─────────────────────────┐
-│         LOOP            │
-│   input → LLM → action  │
-│          ↑         │    │
-│          └─────────┘    │
-└───────────┬─────────────┘
-            ↓
-      ┌──────────┐
-      │  Tools   │
-      └──────────┘
-```
+- Schedule is a tool that manages time-based automation
 
 ### The Data Model
 
-Four core entities:
+Core entities:
 
 ```python
 Message {
@@ -131,6 +119,8 @@ Tool {
   description: string
   parameters: json_schema
   execute: function
+  packages: list[str]  # Required packages
+  env: list[str]       # Required env vars
 }
 
 Thread {
@@ -140,10 +130,31 @@ Thread {
 
 Objective {
   id: string
-  description: string
+  goal: string
   status: "pending" | "running" | "completed" | "failed"
   thread_id: string
-  recurring: string | None  # "hourly", "daily", "every N minutes"
+  schedule: string | None
+  result: string | None
+  error: string | None
+}
+
+Schedule {
+  kind: "at" | "every" | "cron"
+  at: string | None      # ISO timestamp for one-time
+  every: string | None   # Interval: "5m", "2h", "1d"
+  cron: string | None    # Cron expression
+  tz: string | None      # Timezone
+}
+
+ScheduledTask {
+  id: string
+  name: string
+  goal: string
+  schedule: Schedule
+  enabled: bool
+  next_run_at: string
+  last_run_at: string
+  run_count: int
 }
 ```
 
@@ -154,10 +165,13 @@ Objective {
 git clone <repo-url>
 cd babyagi_3
 
-# Install dependencies (choose one)
-pip install anthropic e2b-code-interpreter fastapi pydantic uvicorn
-# Or using uv:
+# Install dependencies using uv (recommended)
 uv sync
+
+# Or using pip
+pip install anthropic e2b-code-interpreter fastapi pydantic uvicorn \
+    duckduckgo-search httpx beautifulsoup4 agentmail keyring \
+    keyrings-cryptfile ddgs croniter pyyaml
 
 # Set your API key
 export ANTHROPIC_API_KEY="your-api-key"
@@ -169,11 +183,14 @@ export ANTHROPIC_API_KEY="your-api-key"
 # For email functionality
 export AGENTMAIL_API_KEY="your-agentmail-key"
 
-# For secure secrets storage
-pip install keyring keyrings.cryptfile
+# For browser automation
+export BROWSER_USE_API_KEY="your-browser-use-key"
 
-# For web browsing (auto-installed when needed)
-pip install browser-use langchain-anthropic
+# For dynamic tool sandboxing
+export E2B_API_KEY="your-e2b-key"
+
+# For voice channel (install separately)
+pip install sounddevice numpy openai-whisper pyttsx3
 ```
 
 ## Usage
@@ -245,10 +262,10 @@ agent = Agent()
 agent.run("Hello, remember that my favorite color is blue.")
 agent.run("What's my favorite color?")
 
-# Task management
-agent.run("Add a task: review the Q1 report")
-agent.run("What are my tasks?")
-agent.run("Mark the first task as complete")
+# Notes management
+agent.run("Add a note: review the Q1 report")
+agent.run("What are my notes?")
+agent.run("Mark note 0 as complete")
 
 # Multiple threads (separate conversations)
 agent.run("Remember: project deadline is Friday", thread_id="work")
@@ -257,6 +274,11 @@ agent.run("Remember: buy groceries", thread_id="personal")
 # Background objectives
 agent.run("Research competitor products and create a report")
 # Chat continues while objective runs in background
+
+# Scheduling
+agent.run("Remind me in 30 minutes to take a break")
+agent.run("Check server status every 5 minutes")
+agent.run("Send me a daily summary at 9am")
 
 # Teaching new tools
 agent.run("""
@@ -284,33 +306,33 @@ agent.run("Show me my recent memories")
 
 **Actions:**
 - `store` — Save content to memory with timestamp
-- `search` — Find memories by keyword
-- `list` — Show recent memories
+- `search` — Find memories by keyword (returns last 10 matches)
+- `list` — Show recent memories (last 20)
 
-### Task Tool
+### Notes Tool
 
-Simple CRUD operations on a task list.
+Simple todo list for passive tracking (unlike active objectives).
 
 ```python
-# Add tasks
-agent.run("Add a task: write documentation")
-agent.run("Add a task: fix the login bug")
+# Add notes
+agent.run("Add a note: write documentation")
+agent.run("Add a note: fix the login bug")
 
-# List tasks
-agent.run("What are my tasks?")
+# List notes
+agent.run("What are my notes?")
 
-# Complete a task
-agent.run("Complete task 0")
+# Complete a note
+agent.run("Complete note 0")
 
-# Remove a task
-agent.run("Remove task 1")
+# Remove a note
+agent.run("Remove note 1")
 ```
 
 **Actions:**
-- `add` — Create a new task
-- `list` — Show all tasks
-- `complete` — Mark a task as done
-- `remove` — Delete a task
+- `add` — Create a new note (text)
+- `list` — Show all notes
+- `complete` — Mark a note as done (id)
+- `remove` — Delete a note (id)
 
 ### Objectives Tool
 
@@ -320,35 +342,66 @@ Background work that runs asynchronously while chat continues.
 # Start a one-time objective
 agent.run("Research the latest Claude API features and summarize them")
 
-# Start a recurring objective
-agent.run("Every day, check my inbox and summarize important emails")
-
 # Check objective status
 agent.run("What objectives are running?")
+
+# Cancel an objective
+agent.run("Cancel objective abc123")
 ```
 
 **Actions:**
-- `create` — Start a new background objective
-- `list` — Show all objectives and their status
-- `check` — Get status of a specific objective
+- `spawn` — Start a new background objective (goal, optional schedule)
+- `list` — See all objectives and their status
+- `check` — Get details of specific objective (id)
+- `cancel` — Stop an objective (id)
 
-**Scheduling options:**
-- `"hourly"` — Run every hour
-- `"daily"` — Run every day
-- `"every N minutes"` — Run at custom intervals
+### Schedule Tool
 
-### Notes Tool
-
-Quick note-taking without search overhead.
+Full-featured time-based task automation with persistence.
 
 ```python
-agent.run("Note: API rate limit is 100 requests per minute")
-agent.run("Show my notes")
+# One-time reminders
+agent.run("Remind me in 30 minutes to call mom")
+agent.run("Schedule a task at 3pm to send the report")
+
+# Recurring tasks
+agent.run("Check my email every hour")
+agent.run("Send me a daily summary at 9am")
+agent.run("Run health checks every 5 minutes")
+
+# Cron expressions
+agent.run("Run backups at midnight on weekdays")
 ```
+
+**Actions:**
+- `add` — Create scheduled task (name, goal, spec)
+- `list` — View all scheduled tasks
+- `get` — Get task details (id)
+- `update` — Modify task (id, name?, goal?, spec?, enabled?)
+- `remove` — Delete task (id)
+- `run` — Execute task now (id, force=True)
+- `history` — View execution history (id, limit=10)
+
+**Schedule Specification (string shortcuts):**
+- `"in 5m"` or `"in 2h"` — one-time, relative
+- `"every 5m"` or `"every 1h"` — recurring interval
+- `"daily at 9:00"` — daily at specific time
+- `"weekdays at 9am"` — weekdays only
+- `"hourly"` or `"daily"` — simple patterns
+- `"0 9 * * 1-5"` — raw cron expression
+
+**Schedule Specification (full control):**
+```json
+{"kind": "at", "at": "2024-01-15T09:00:00", "tz": "America/New_York"}
+{"kind": "every", "every": "5m"}
+{"kind": "cron", "cron": "0 9 * * 1-5", "tz": "America/New_York"}
+```
+
+**Persistence:** Tasks are stored in `~/.babyagi/scheduler/tasks.json` and survive restarts.
 
 ### Register Tool Tool
 
-Meta-tool for runtime extensibility. Dynamically created tools run in a secure e2b sandbox.
+Meta-tool for runtime extensibility. Dynamically created tools run in a secure e2b sandbox when they require external packages.
 
 ```python
 agent.run("""
@@ -360,7 +413,22 @@ It should take a value and a direction (c_to_f or f_to_c).
 agent.run("Convert 100 Celsius to Fahrenheit")
 ```
 
-Tools that require external packages are automatically sandboxed for safety.
+Tools that require external packages are automatically detected and sandboxed for safety.
+
+### Send Message Tool
+
+Send messages across any configured channel:
+
+```python
+# The agent can use send_message to communicate on any channel
+agent.run("Send me an email when the research is done")
+agent.run("Text me if there's an urgent issue")
+
+# Cross-channel examples:
+# - Receive email → respond via email AND text you
+# - Background task completes → email results to you
+# - External person emails → consult with you via CLI
+```
 
 ## External Tools
 
@@ -372,11 +440,14 @@ BabyAGI includes optional external tools for web, email, and secrets management.
 # Search the web (uses DuckDuckGo, no API key needed)
 agent.run("Search for 'latest machine learning papers 2024'")
 
-# Browse a webpage with AI
+# Browse a webpage with AI (requires BROWSER_USE_API_KEY)
 agent.run("Go to example.com and extract the main content")
 
 # Fetch and parse a URL
 agent.run("Fetch https://api.example.com/status and show me the response")
+
+# Auto-signup workflow (requires BROWSER_USE_API_KEY and AGENTMAIL_API_KEY)
+agent.run("Sign up for service X and get the API key")
 ```
 
 ### Email Tools
@@ -399,7 +470,7 @@ agent.run("Sign up for service X and wait for the verification email")
 
 ### Secrets Management
 
-Securely store and retrieve API keys.
+Securely store and retrieve API keys using system keyring.
 
 ```python
 # Store a secret
@@ -410,21 +481,6 @@ agent.run("What API keys do I have stored?")
 
 # Secrets are automatically retrieved when needed
 agent.run("Use my GitHub token to check my repositories")
-```
-
-### Send Message Tool
-
-Send messages across any configured channel:
-
-```python
-# The agent can use send_message to communicate on any channel
-agent.run("Send me an email when the research is done")
-agent.run("Text me if there's an urgent issue")
-
-# Cross-channel examples:
-# - Receive email → respond via email AND text you
-# - Background task completes → email results to you
-# - External person emails → consult with you via CLI
 ```
 
 ## Configuration
@@ -448,11 +504,22 @@ channels:
 
   email:
     enabled: true
-    poll_interval: 60
+    poll_interval: 60  # seconds between inbox checks
+    api_key: "${AGENTMAIL_API_KEY}"
+    inbox_id: "${AGENTMAIL_INBOX_ID}"
 
   voice:
     enabled: false
     wake_word: "hey assistant"
+    stt_provider: "whisper"    # or "openai"
+    tts_provider: "pyttsx3"    # or "openai"
+    whisper_model: "base"      # tiny, base, small, medium, large
+    sample_rate: 16000
+    max_duration: 10           # max recording seconds
+
+agent:
+  model: "claude-sonnet-4-20250514"
+  # model: "claude-opus-4-20250514"  # For more complex tasks
 ```
 
 ### Environment Variables
@@ -465,8 +532,11 @@ export ANTHROPIC_API_KEY="your-anthropic-key"
 export AGENTMAIL_API_KEY="your-agentmail-key"
 export OWNER_EMAIL="you@example.com"
 
-# Optional
-export AGENTMAIL_INBOX_ID="your-inbox-id"
+# Optional - for enhanced features
+export AGENTMAIL_INBOX_ID="your-inbox-id"  # Auto-created if not set
+export BROWSER_USE_API_KEY="your-browser-use-key"  # Browser automation
+export E2B_API_KEY="your-e2b-key"  # Sandbox for dynamic tools
+export OWNER_ID="your-name"  # Owner identifier
 ```
 
 ## API Server Endpoints
@@ -481,6 +551,11 @@ Send a message to the agent.
 curl -X POST http://localhost:8000/message \
   -H "Content-Type: application/json" \
   -d '{"content": "Hello!", "thread_id": "main"}'
+
+# Async mode - returns immediately, processes in background
+curl -X POST http://localhost:8000/message \
+  -H "Content-Type: application/json" \
+  -d '{"content": "Research AI trends", "thread_id": "main", "async_mode": true}'
 ```
 
 ### GET /objectives
@@ -521,6 +596,16 @@ Health check endpoint.
 
 ```bash
 curl http://localhost:8000/health
+```
+
+Returns:
+```json
+{
+  "status": "ok",
+  "objectives_count": 2,
+  "threads_count": 3,
+  "tools": ["memory", "objective", "notes", "schedule", "register_tool", "send_message", ...]
+}
 ```
 
 ## Extending the System
@@ -594,7 +679,7 @@ channels:
 ```python
 from agent import Agent, Tool
 
-def my_tool_fn(params, agent):
+def my_tool_fn(params: dict, agent):
     # Your logic here
     return {"result": "success"}
 
@@ -638,6 +723,16 @@ def calculate_area(length: float, width: float) -> float:
 agent.register(calculate_area)
 ```
 
+With package and environment requirements:
+
+```python
+@tool(packages=["requests"], env=["API_KEY"])
+def fetch_data(endpoint: str) -> dict:
+    """Fetch data from an API endpoint."""
+    import requests
+    return requests.get(endpoint).json()
+```
+
 ### Using a Different Model
 
 ```python
@@ -655,11 +750,35 @@ agent = Agent(load_tools=False)  # Only core tools loaded
 Swap the in-memory lists for a database:
 
 ```python
-# In production, replace MEMORIES and TASKS with:
+# In production, replace MEMORIES and NOTES with:
 # - SQLite for simplicity
 # - PostgreSQL for scale
 # - Redis for speed
 # - Vector DB for semantic search
+```
+
+## Tool Health System
+
+BabyAGI includes an automatic tool health checking system that detects:
+- Which tools are ready to use
+- Which tools need API keys configured
+- Which tools are missing required packages
+
+```python
+from tools import check_tool_health, get_health_summary
+
+# Get detailed health status
+health = check_tool_health()
+# Returns: {
+#   "ready": ["memory", "objective", "notes", "web_search", ...],
+#   "needs_setup": [{"name": "browse", "missing": ["BROWSER_USE_API_KEY"], "reason": "api_keys"}],
+#   "unavailable": [{"name": "voice", "missing": ["sounddevice"], "reason": "packages"}],
+#   "summary": {"total_ready": 8, "needs_api_keys": 2, "needs_packages": 1}
+# }
+
+# Get human-readable summary (used in AI greeting)
+summary = get_health_summary()
+# Returns: "Ready: memory, objective, notes, web_search\nNeed API keys: browse(BROWSER_USE_API_KEY)"
 ```
 
 ## Design Principles
@@ -669,11 +788,13 @@ Swap the in-memory lists for a database:
 | Principle | Implementation |
 |-----------|----------------|
 | **Single loop** | One control flow for everything |
-| **Tools are data** | Same structure handles memory, tasks, objectives |
+| **Tools are data** | Same structure handles memory, tasks, objectives, scheduling |
 | **LLM does the hard work** | Routing, synthesis, organization |
 | **No frameworks** | Just Python and the API |
 | **Extensible by design** | New capabilities = new tools |
 | **Safe extensibility** | Dynamic tools run in sandboxed environment |
+| **Graceful degradation** | Missing packages/APIs degrade functionality but don't crash |
+| **Persistence** | Scheduled tasks survive restarts |
 
 ### The Entire System
 
@@ -681,11 +802,17 @@ Swap the in-memory lists for a database:
 
 ```
 agent.py
-├── Tool class (dataclass)
+├── Tool class (tool definition with health checks)
 ├── Agent class (main loop + channel support)
 ├── Objective class (background work)
-├── Core tools (memory, objectives, notes, register, send_message)
+├── Core tools (memory, objectives, notes, schedule, register, send_message)
 └── Sender registration
+
+scheduler.py
+├── Schedule class (at, every, cron support)
+├── ScheduledTask class (task with execution tracking)
+├── SchedulerStore class (JSON persistence)
+└── Scheduler class (execution engine)
 
 listeners/
 ├── __init__.py
@@ -699,13 +826,13 @@ senders/
 └── email.py (AgentMail output)
 
 tools/
-├── __init__.py (decorator framework)
+├── __init__.py (decorator framework + health checks)
 ├── sandbox.py (e2b code execution)
 ├── web.py (search, browse, fetch)
 ├── email.py (AgentMail tools)
 └── secrets.py (secure key storage)
 
-config.py (YAML loader)
+config.py (YAML loader with env substitution)
 config.yaml (channel configuration)
 server.py (FastAPI endpoints)
 main.py (orchestration)
@@ -738,17 +865,20 @@ Create a detailed report.
 agent.run("While that's running, can you help me with something else?")
 ```
 
-### Recurring Tasks
+### Scheduled Tasks
 
 ```python
+# One-time reminder
+agent.run("Remind me in 2 hours to take a break")
+
 # Daily summary
 agent.run("Every day at 9am, summarize my unread emails")
 
-# Hourly check
-agent.run("Every hour, check the server status and alert me if it's down")
+# Health monitoring
+agent.run("Every 5 minutes, check the server status and alert me if it's down")
 
-# Custom interval
-agent.run("Every 30 minutes, fetch the latest stock prices")
+# Cron-based scheduling
+agent.run("Run backups at 2am on weekdays")
 ```
 
 ### Reflection and Consolidation
@@ -756,7 +886,7 @@ agent.run("Every 30 minutes, fetch the latest stock prices")
 ```python
 # Periodically consolidate memories
 agent.run("""
-Review all my memories and tasks. Create a summary of:
+Review all my memories and notes. Create a summary of:
 1. Key facts about me
 2. Important ongoing projects
 3. Patterns you've noticed
@@ -770,9 +900,9 @@ The LLM naturally composes tools:
 
 ```python
 agent.run("""
-Add a task for each memory I've stored today.
+Add a note for each memory I've stored today.
 """)
-# Agent will: search memories → add task for each
+# Agent will: search memories → add note for each
 ```
 
 ### Auto-Signup Workflow
@@ -814,8 +944,9 @@ class Agent:
         self,
         user_input: str,
         thread_id: str = "main",
-        context: dict = None  # Channel context (is_owner, sender, etc.)
+        context: dict = None  # Channel context (is_owner, sender, channel)
     ) -> str
+    async def run_scheduler(self) -> None  # Start the scheduler loop
     def get_thread(self, thread_id: str = "main") -> list
     def clear_thread(self, thread_id: str = "main") -> None
 ```
@@ -828,8 +959,11 @@ class Tool:
     description: str
     parameters: dict  # JSON Schema
     fn: Callable[[dict, Agent], dict]
+    packages: list[str]  # Required packages
+    env: list[str]       # Required env vars
 
     def execute(self, params: dict, agent: Agent) -> dict
+    def check_health(self) -> dict  # Check requirements
 ```
 
 ### Objective
@@ -838,12 +972,45 @@ class Tool:
 @dataclass
 class Objective:
     id: str
-    description: str
+    goal: str
     status: str  # "pending", "running", "completed", "failed"
     thread_id: str
+    schedule: str | None
     result: str | None
-    recurring: str | None  # "hourly", "daily", "every N minutes"
-    last_run: datetime | None
+    error: str | None
+    created: str
+    completed: str | None
+```
+
+### Schedule
+
+```python
+@dataclass
+class Schedule:
+    kind: Literal["at", "every", "cron"]
+    at: str | None      # ISO timestamp for one-time
+    every: str | None   # Interval: "5m", "2h", "1d"
+    cron: str | None    # Cron expression
+    tz: str | None      # Timezone
+
+    def next_run(self, after: datetime = None) -> datetime | None
+    def human_readable(self) -> str
+```
+
+### ScheduledTask
+
+```python
+@dataclass
+class ScheduledTask:
+    id: str
+    name: str
+    goal: str
+    schedule: Schedule
+    enabled: bool = True
+    next_run_at: str | None
+    last_run_at: str | None
+    last_status: str | None  # "ok", "error", "skipped"
+    run_count: int = 0
 ```
 
 ### Tool Decorator
@@ -861,7 +1028,13 @@ def my_function(param1: str, param2: int = 0) -> dict:
     """
     return {"result": "value"}
 
-# Or with explicit name/description
+# With requirements
+@tool(packages=["httpx"], env=["API_KEY"])
+def api_call(endpoint: str) -> dict:
+    """Call an API endpoint."""
+    ...
+
+# With custom name/description
 @tool(name="custom_name", description="Custom description")
 def another_function(x: float) -> float:
     return x * 2
@@ -870,18 +1043,35 @@ def another_function(x: float) -> float:
 ## Requirements
 
 - Python >= 3.12
-- anthropic >= 0.76.0
-- e2b-code-interpreter >= 1.0.0
-- fastapi >= 0.115.0
-- pydantic >= 2.12.5
-- uvicorn >= 0.32.0
-- pyyaml >= 6.0 (for config loading)
 
-### Optional (for channels)
+### Core Dependencies
 
-- agentmail (email channel)
-- sounddevice, numpy, openai-whisper (voice input)
-- pyttsx3 or openai (voice output)
+```
+anthropic >= 0.76.0
+e2b-code-interpreter >= 1.0.0
+fastapi >= 0.115.0
+pydantic >= 2.12.5
+uvicorn >= 0.32.0
+duckduckgo-search >= 7.0.0
+httpx >= 0.27.0
+beautifulsoup4 >= 4.12.0
+agentmail >= 0.1.0
+keyring >= 25.0.0
+keyrings-cryptfile >= 1.3.9
+ddgs >= 9.10.0
+croniter >= 2.0.0
+pyyaml >= 6.0
+```
+
+### Optional (for voice channel)
+
+```
+sounddevice
+numpy
+openai-whisper  # Local transcription
+pyttsx3         # Local text-to-speech
+openai          # Cloud STT/TTS
+```
 
 ## Philosophy
 

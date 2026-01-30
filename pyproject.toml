@@ -22,6 +22,8 @@ dependencies = [
     "ddgs>=9.10.0",
     # Scheduler (optional but recommended for full cron support)
     "croniter>=2.0.0",
+    # Configuration
+    "pyyaml>=6.0",
 ]
 
 [project.scripts]
