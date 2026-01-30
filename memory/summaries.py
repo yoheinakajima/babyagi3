@@ -4,10 +4,124 @@ Summary management for the memory system.
 Handles summary generation, updates, and staleness propagation.
 """
 
+import heapq
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from .embeddings import get_embedding
 from .models import SummaryNode
+
+
+# ═══════════════════════════════════════════════════════════
+# STALENESS PRIORITY QUEUE
+# ═══════════════════════════════════════════════════════════
+
+
+@dataclass
+class StalenessConfig:
+    """Configuration for staleness-based refresh."""
+
+    threshold: int = 10  # Events before refresh
+    max_batch_size: int = 20  # Max nodes to refresh at once
+    leaf_priority_boost: float = 1.5  # Multiply staleness for leaves
+    age_factor: float = 0.1  # Add staleness per day since last update
+
+
+@dataclass(order=True)
+class PriorityNode:
+    """A node with computed priority for the refresh queue."""
+
+    priority: float
+    node: SummaryNode = field(compare=False)
+
+    @classmethod
+    def compute(cls, node: SummaryNode, config: StalenessConfig) -> "PriorityNode":
+        """Compute priority for a node."""
+        # Base priority is events_since_update
+        priority = float(node.events_since_update)
+
+        # Boost priority for leaf nodes (they feed into branches)
+        if node.node_type in ("entity", "topic", "task"):
+            priority *= config.leaf_priority_boost
+
+        # Add age factor
+        if node.summary_updated_at:
+            days_since_update = (datetime.now() - node.summary_updated_at).days
+            priority += days_since_update * config.age_factor
+
+        # Higher priority = more negative (for min-heap with max priority)
+        return cls(priority=-priority, node=node)
+
+
+class StalenessQueue:
+    """
+    Priority queue for stale summary nodes.
+
+    Prioritizes nodes based on:
+    - Number of events since last update
+    - Node type (leaves before branches)
+    - Time since last update
+    """
+
+    def __init__(self, store, config: StalenessConfig | None = None):
+        self.store = store
+        self.config = config or StalenessConfig()
+        self._heap: list[PriorityNode] = []
+        self._node_ids: set[str] = set()  # Track nodes in queue
+
+    def refresh(self):
+        """Refresh the queue from database."""
+        stale_nodes = self.store.get_stale_nodes(self.config.threshold)
+        self._heap = []
+        self._node_ids = set()
+
+        for node in stale_nodes:
+            self._add_node(node)
+
+    def _add_node(self, node: SummaryNode):
+        """Add a node to the queue."""
+        if node.id in self._node_ids:
+            return
+        priority_node = PriorityNode.compute(node, self.config)
+        heapq.heappush(self._heap, priority_node)
+        self._node_ids.add(node.id)
+
+    def pop(self) -> SummaryNode | None:
+        """Get the highest priority node."""
+        while self._heap:
+            priority_node = heapq.heappop(self._heap)
+            self._node_ids.discard(priority_node.node.id)
+
+            # Verify node is still stale (may have been refreshed)
+            current = self.store.get_summary_node_by_id(priority_node.node.id)
+            if current and current.events_since_update >= self.config.threshold:
+                return current
+
+        return None
+
+    def get_batch(self, size: int | None = None) -> list[SummaryNode]:
+        """Get a batch of high-priority nodes."""
+        size = size or self.config.max_batch_size
+        batch = []
+
+        while len(batch) < size:
+            node = self.pop()
+            if node is None:
+                break
+            batch.append(node)
+
+        return batch
+
+    def __len__(self) -> int:
+        return len(self._heap)
+
+    def is_empty(self) -> bool:
+        return len(self._heap) == 0
+
+
+# ═══════════════════════════════════════════════════════════
+# SUMMARY MANAGER
+# ═══════════════════════════════════════════════════════════
 
 
 class SummaryManager:
@@ -20,9 +134,11 @@ class SummaryManager:
     - Root summarizes everything
     """
 
-    def __init__(self, store):
+    def __init__(self, store, staleness_config: StalenessConfig | None = None):
         self.store = store
+        self.staleness_config = staleness_config or StalenessConfig()
         self._client = None
+        self._queue: StalenessQueue | None = None
 
     @property
     def client(self):
@@ -33,17 +149,50 @@ class SummaryManager:
             self._client = anthropic.Anthropic()
         return self._client
 
-    async def refresh_stale(self, threshold: int = 10) -> int:
+    @property
+    def queue(self) -> StalenessQueue:
+        """Get the staleness priority queue."""
+        if self._queue is None:
+            self._queue = StalenessQueue(self.store, self.staleness_config)
+        return self._queue
+
+    async def refresh_stale(self, threshold: int | None = None) -> int:
         """
-        Refresh all stale summary nodes.
+        Refresh stale summary nodes using priority queue.
 
         Returns the number of summaries refreshed.
         """
-        stale_nodes = self.store.get_stale_nodes(threshold)
-        refreshed = 0
+        # Update threshold if provided
+        if threshold is not None:
+            self.staleness_config.threshold = threshold
 
-        # Process in order (leaves first due to ordering in query)
-        for node in stale_nodes:
+        # Refresh the queue from database
+        self.queue.refresh()
+
+        refreshed = 0
+        batch = self.queue.get_batch()
+
+        # Process in priority order
+        for node in batch:
+            try:
+                await self.refresh_node(node)
+                refreshed += 1
+            except Exception as e:
+                print(f"Failed to refresh summary {node.key}: {e}")
+
+        return refreshed
+
+    async def refresh_stale_batch(self, batch_size: int = 10) -> int:
+        """
+        Refresh a specific number of stale nodes by priority.
+
+        Returns the number of summaries refreshed.
+        """
+        self.queue.refresh()
+        batch = self.queue.get_batch(batch_size)
+
+        refreshed = 0
+        for node in batch:
             try:
                 await self.refresh_node(node)
                 refreshed += 1

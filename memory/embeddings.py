@@ -2,15 +2,188 @@
 Embedding generation utilities for the memory system.
 
 Supports both OpenAI embeddings and local models.
+Includes caching and graceful fallback.
 """
 
+import hashlib
 import os
+import sqlite3
+import struct
+import time
+from dataclasses import dataclass
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 # Default embedding model
 DEFAULT_MODEL = "text-embedding-3-small"
 EMBEDDING_DIM = 1536
+
+
+# ═══════════════════════════════════════════════════════════
+# EMBEDDING CACHE
+# ═══════════════════════════════════════════════════════════
+
+
+@dataclass
+class CacheConfig:
+    """Configuration for embedding cache."""
+
+    enabled: bool = True
+    max_entries: int = 10000
+    ttl_seconds: int = 86400 * 30  # 30 days
+    cache_path: str = "~/.babyagi/memory/embedding_cache.db"
+
+
+class EmbeddingCache:
+    """
+    SQLite-based cache for embeddings.
+
+    Caches embeddings by text hash to avoid redundant API calls.
+    """
+
+    def __init__(self, config: CacheConfig | None = None):
+        self.config = config or CacheConfig()
+        self._conn: sqlite3.Connection | None = None
+        self._initialized = False
+
+    @property
+    def conn(self) -> sqlite3.Connection:
+        """Get database connection (lazy initialization)."""
+        if self._conn is None:
+            cache_path = Path(self.config.cache_path).expanduser()
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            self._conn = sqlite3.connect(str(cache_path), check_same_thread=False)
+            self._conn.row_factory = sqlite3.Row
+            if not self._initialized:
+                self._initialize_schema()
+                self._initialized = True
+        return self._conn
+
+    def _initialize_schema(self):
+        """Create cache table."""
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS embedding_cache (
+                text_hash TEXT PRIMARY KEY,
+                model TEXT NOT NULL,
+                embedding BLOB NOT NULL,
+                created_at REAL NOT NULL
+            )
+        """
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_cache_created ON embedding_cache(created_at)"
+        )
+        self.conn.commit()
+
+    def _hash_text(self, text: str, model: str) -> str:
+        """Generate hash for text + model combination."""
+        content = f"{model}:{text}"
+        return hashlib.sha256(content.encode()).hexdigest()
+
+    def get(self, text: str, model: str) -> list[float] | None:
+        """Get cached embedding."""
+        if not self.config.enabled:
+            return None
+
+        text_hash = self._hash_text(text, model)
+        cur = self.conn.cursor()
+        cur.execute(
+            "SELECT embedding, created_at FROM embedding_cache WHERE text_hash = ?",
+            (text_hash,),
+        )
+        row = cur.fetchone()
+
+        if row is None:
+            return None
+
+        # Check TTL
+        if time.time() - row["created_at"] > self.config.ttl_seconds:
+            cur.execute("DELETE FROM embedding_cache WHERE text_hash = ?", (text_hash,))
+            self.conn.commit()
+            return None
+
+        # Deserialize embedding
+        data = row["embedding"]
+        count = len(data) // 4
+        return list(struct.unpack(f"{count}f", data))
+
+    def put(self, text: str, model: str, embedding: list[float]):
+        """Store embedding in cache."""
+        if not self.config.enabled:
+            return
+
+        text_hash = self._hash_text(text, model)
+        data = struct.pack(f"{len(embedding)}f", *embedding)
+
+        self.conn.execute(
+            """
+            INSERT OR REPLACE INTO embedding_cache (text_hash, model, embedding, created_at)
+            VALUES (?, ?, ?, ?)
+        """,
+            (text_hash, model, data, time.time()),
+        )
+        self.conn.commit()
+
+        # Prune if needed
+        self._prune_if_needed()
+
+    def _prune_if_needed(self):
+        """Remove old entries if cache exceeds max size."""
+        cur = self.conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM embedding_cache")
+        count = cur.fetchone()[0]
+
+        if count > self.config.max_entries:
+            # Remove oldest 10%
+            remove_count = count // 10
+            cur.execute(
+                """
+                DELETE FROM embedding_cache
+                WHERE text_hash IN (
+                    SELECT text_hash FROM embedding_cache
+                    ORDER BY created_at ASC
+                    LIMIT ?
+                )
+            """,
+                (remove_count,),
+            )
+            self.conn.commit()
+
+    def clear(self):
+        """Clear all cached embeddings."""
+        self.conn.execute("DELETE FROM embedding_cache")
+        self.conn.commit()
+
+    def close(self):
+        """Close database connection."""
+        if self._conn:
+            self._conn.close()
+            self._conn = None
+
+
+# Global cache instance
+_cache: EmbeddingCache | None = None
+
+
+def get_cache() -> EmbeddingCache:
+    """Get the global embedding cache."""
+    global _cache
+    if _cache is None:
+        _cache = EmbeddingCache()
+    return _cache
+
+
+def set_cache(cache: EmbeddingCache):
+    """Set the global embedding cache."""
+    global _cache
+    _cache = cache
+
+
+# ═══════════════════════════════════════════════════════════
+# EMBEDDING PROVIDERS
+# ═══════════════════════════════════════════════════════════
 
 
 class EmbeddingProvider:
@@ -26,10 +199,11 @@ class EmbeddingProvider:
 
 
 class OpenAIEmbeddings(EmbeddingProvider):
-    """OpenAI embedding provider."""
+    """OpenAI embedding provider with caching."""
 
-    def __init__(self, model: str = DEFAULT_MODEL):
+    def __init__(self, model: str = DEFAULT_MODEL, use_cache: bool = True):
         self.model = model
+        self.use_cache = use_cache
         self._client = None
 
     @property
@@ -49,21 +223,62 @@ class OpenAIEmbeddings(EmbeddingProvider):
         if len(text) > 8000:
             text = text[:8000]
 
+        # Check cache first
+        if self.use_cache:
+            cache = get_cache()
+            cached = cache.get(text, self.model)
+            if cached is not None:
+                return cached
+
+        # Generate embedding
         response = self.client.embeddings.create(input=text, model=self.model)
-        return response.data[0].embedding
+        embedding = response.data[0].embedding
+
+        # Store in cache
+        if self.use_cache:
+            cache.put(text, self.model, embedding)
+
+        return embedding
 
     def embed_batch(self, texts: list[str], batch_size: int = 100) -> list[list[float]]:
         """Generate embeddings for multiple texts."""
         # Truncate texts
         texts = [t[:8000] if len(t) > 8000 else t for t in texts]
 
-        all_embeddings = []
-        for i in range(0, len(texts), batch_size):
-            batch = texts[i : i + batch_size]
-            response = self.client.embeddings.create(input=batch, model=self.model)
-            all_embeddings.extend([d.embedding for d in response.data])
+        # Check cache for each text
+        results = [None] * len(texts)
+        uncached_indices = []
+        uncached_texts = []
 
-        return all_embeddings
+        if self.use_cache:
+            cache = get_cache()
+            for i, text in enumerate(texts):
+                cached = cache.get(text, self.model)
+                if cached is not None:
+                    results[i] = cached
+                else:
+                    uncached_indices.append(i)
+                    uncached_texts.append(text)
+        else:
+            uncached_indices = list(range(len(texts)))
+            uncached_texts = texts
+
+        # Generate embeddings for uncached texts
+        if uncached_texts:
+            all_embeddings = []
+            for i in range(0, len(uncached_texts), batch_size):
+                batch = uncached_texts[i : i + batch_size]
+                response = self.client.embeddings.create(input=batch, model=self.model)
+                all_embeddings.extend([d.embedding for d in response.data])
+
+            # Store in cache and results
+            cache = get_cache() if self.use_cache else None
+            for idx, embedding in zip(uncached_indices, all_embeddings):
+                results[idx] = embedding
+                if cache:
+                    cache.put(texts[idx], self.model, embedding)
+
+        return results
 
 
 class AnthropicVoyageEmbeddings(EmbeddingProvider):
@@ -154,22 +369,56 @@ class MockEmbeddings(EmbeddingProvider):
 
 # Global provider instance
 _provider: EmbeddingProvider | None = None
+_fallback_provider: EmbeddingProvider | None = None
 
 
 def get_provider() -> EmbeddingProvider:
     """Get the current embedding provider."""
     global _provider
     if _provider is None:
-        # Auto-detect based on available packages and API keys
-        if os.environ.get("OPENAI_API_KEY"):
-            _provider = OpenAIEmbeddings()
-        elif os.environ.get("VOYAGE_API_KEY"):
-            _provider = AnthropicVoyageEmbeddings()
-        else:
-            # Fall back to mock embeddings if no API keys
-            # In production, you'd want to use local embeddings
-            _provider = MockEmbeddings()
+        _provider = _create_provider()
     return _provider
+
+
+def _create_provider() -> EmbeddingProvider:
+    """Create an embedding provider based on available packages and API keys."""
+    # Try OpenAI first
+    if os.environ.get("OPENAI_API_KEY"):
+        try:
+            provider = OpenAIEmbeddings()
+            # Test that it works
+            provider.client  # This will raise if there's an issue
+            return provider
+        except Exception:
+            pass
+
+    # Try Voyage
+    if os.environ.get("VOYAGE_API_KEY"):
+        try:
+            provider = AnthropicVoyageEmbeddings()
+            provider.client  # Test
+            return provider
+        except Exception:
+            pass
+
+    # Try local embeddings
+    try:
+        provider = LocalEmbeddings()
+        provider.model  # Test
+        return provider
+    except Exception:
+        pass
+
+    # Fall back to mock embeddings
+    return MockEmbeddings()
+
+
+def get_fallback_provider() -> EmbeddingProvider:
+    """Get the fallback provider (mock embeddings)."""
+    global _fallback_provider
+    if _fallback_provider is None:
+        _fallback_provider = MockEmbeddings()
+    return _fallback_provider
 
 
 def set_provider(provider: EmbeddingProvider):
@@ -182,9 +431,15 @@ def get_embedding(text: str) -> list[float]:
     """
     Generate an embedding for a single text.
 
-    Uses the configured provider (OpenAI by default if OPENAI_API_KEY is set).
+    Uses the configured provider with graceful fallback to mock embeddings
+    if the primary provider fails.
     """
-    return get_provider().embed(text)
+    try:
+        return get_provider().embed(text)
+    except Exception as e:
+        # Log the error (could use proper logging in production)
+        print(f"Embedding generation failed, using fallback: {e}")
+        return get_fallback_provider().embed(text)
 
 
 def get_embeddings(texts: list[str]) -> list[list[float]]:
@@ -192,8 +447,13 @@ def get_embeddings(texts: list[str]) -> list[list[float]]:
     Generate embeddings for multiple texts.
 
     More efficient than calling get_embedding in a loop.
+    Uses graceful fallback if primary provider fails.
     """
-    return get_provider().embed_batch(texts)
+    try:
+        return get_provider().embed_batch(texts)
+    except Exception as e:
+        print(f"Batch embedding generation failed, using fallback: {e}")
+        return get_fallback_provider().embed_batch(texts)
 
 
 def cosine_similarity(a: list[float], b: list[float]) -> float:

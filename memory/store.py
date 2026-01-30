@@ -8,7 +8,8 @@ import json
 import os
 import sqlite3
 import struct
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -27,6 +28,33 @@ from .models import (
 
 # Vector dimensions
 EMBEDDING_DIM = 1536
+
+
+# ═══════════════════════════════════════════════════════════
+# EVENT RETENTION POLICY
+# ═══════════════════════════════════════════════════════════
+
+
+@dataclass
+class RetentionPolicy:
+    """Configuration for event retention."""
+
+    # Maximum age for events (None = keep forever)
+    max_age_days: int | None = 365
+
+    # Maximum number of events (None = no limit)
+    max_events: int | None = 100000
+
+    # Keep important events longer
+    important_event_types: list[str] | None = None  # e.g., ["task_completed", "observation"]
+    important_multiplier: float = 3.0  # Keep important events 3x longer
+
+    # Never delete events with these properties
+    preserve_with_entities: bool = True  # Keep events linked to entities
+    preserve_owner_events: bool = True  # Keep owner's events
+
+    # Batch size for cleanup
+    cleanup_batch_size: int = 1000
 
 
 def serialize_embedding(embedding: list[float] | None) -> bytes | None:
@@ -521,6 +549,68 @@ class MemoryStore:
             (status, extracted_at.isoformat() if extracted_at else None, event_id),
         )
         self.conn.commit()
+
+    def increment_extraction_retry(self, event_id: str) -> int:
+        """
+        Increment the retry count for an event extraction.
+
+        Returns the new retry count.
+        """
+        cur = self.conn.cursor()
+        # Get current metadata
+        cur.execute("SELECT metadata FROM events WHERE id = ?", (event_id,))
+        row = cur.fetchone()
+        if row is None:
+            return 0
+
+        metadata = deserialize_json(row["metadata"]) or {}
+        retry_count = metadata.get("extraction_retries", 0) + 1
+        metadata["extraction_retries"] = retry_count
+        metadata["last_extraction_attempt"] = now_iso()
+
+        cur.execute(
+            "UPDATE events SET metadata = ? WHERE id = ?",
+            (serialize_json(metadata), event_id),
+        )
+        self.conn.commit()
+        return retry_count
+
+    def get_extraction_retry_count(self, event_id: str) -> int:
+        """Get the current retry count for an event."""
+        cur = self.conn.cursor()
+        cur.execute("SELECT metadata FROM events WHERE id = ?", (event_id,))
+        row = cur.fetchone()
+        if row is None:
+            return 0
+
+        metadata = deserialize_json(row["metadata"]) or {}
+        return metadata.get("extraction_retries", 0)
+
+    def get_failed_extraction_events(
+        self, max_retries: int = 3, limit: int = 100
+    ) -> list[Event]:
+        """Get failed events that haven't exceeded max retries."""
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            SELECT * FROM events
+            WHERE extraction_status = 'failed'
+            ORDER BY timestamp DESC
+            LIMIT ?
+        """,
+            (limit * 2,),  # Fetch extra to filter
+        )
+
+        events = []
+        for row in cur.fetchall():
+            event = self._row_to_event(row)
+            retry_count = (event.metadata or {}).get("extraction_retries", 0)
+            if retry_count < max_retries:
+                events.append(event)
+                if len(events) >= limit:
+                    break
+
+        return events
 
     def update_event_embedding(self, event_id: str, embedding: list[float]):
         """Update the content embedding of an event."""
@@ -1556,7 +1646,146 @@ class MemoryStore:
         )
 
     # ═══════════════════════════════════════════════════════════
-    # CLEANUP
+    # EVENT RETENTION / CLEANUP
+    # ═══════════════════════════════════════════════════════════
+
+    def apply_retention_policy(self, policy: RetentionPolicy) -> int:
+        """
+        Apply retention policy to clean up old events.
+
+        Returns the number of events deleted.
+        """
+        deleted = 0
+
+        # Delete by age
+        if policy.max_age_days is not None:
+            deleted += self._delete_old_events(policy)
+
+        # Delete by count
+        if policy.max_events is not None:
+            deleted += self._trim_to_max_events(policy)
+
+        return deleted
+
+    def _delete_old_events(self, policy: RetentionPolicy) -> int:
+        """Delete events older than max_age_days."""
+        cur = self.conn.cursor()
+        deleted = 0
+
+        # Calculate cutoff dates
+        cutoff = (datetime.now() - timedelta(days=policy.max_age_days)).isoformat()
+        important_cutoff = None
+        if policy.important_event_types and policy.important_multiplier > 1:
+            important_days = int(policy.max_age_days * policy.important_multiplier)
+            important_cutoff = (datetime.now() - timedelta(days=important_days)).isoformat()
+
+        # Build exclusion conditions
+        exclusions = []
+        params = [cutoff]
+
+        if policy.preserve_with_entities:
+            exclusions.append("person_id IS NOT NULL")
+
+        if policy.preserve_owner_events:
+            exclusions.append("is_owner = 1")
+
+        # Handle important event types
+        if policy.important_event_types and important_cutoff:
+            important_types = ",".join(f"'{t}'" for t in policy.important_event_types)
+            exclusions.append(f"(event_type IN ({important_types}) AND timestamp > ?)")
+            params.append(important_cutoff)
+
+        exclusion_clause = " OR ".join(exclusions) if exclusions else "0"
+
+        # Delete in batches
+        while True:
+            cur.execute(
+                f"""
+                DELETE FROM events
+                WHERE id IN (
+                    SELECT id FROM events
+                    WHERE timestamp < ?
+                    AND NOT ({exclusion_clause})
+                    LIMIT ?
+                )
+            """,
+                params + [policy.cleanup_batch_size],
+            )
+            batch_deleted = cur.rowcount
+            self.conn.commit()
+
+            if batch_deleted == 0:
+                break
+            deleted += batch_deleted
+
+        return deleted
+
+    def _trim_to_max_events(self, policy: RetentionPolicy) -> int:
+        """Trim events to max_events count."""
+        cur = self.conn.cursor()
+
+        # Get current count
+        cur.execute("SELECT COUNT(*) FROM events")
+        current_count = cur.fetchone()[0]
+
+        if current_count <= policy.max_events:
+            return 0
+
+        excess = current_count - policy.max_events
+        deleted = 0
+
+        # Build exclusion conditions
+        exclusions = []
+        if policy.preserve_with_entities:
+            exclusions.append("person_id IS NOT NULL")
+        if policy.preserve_owner_events:
+            exclusions.append("is_owner = 1")
+
+        exclusion_clause = " OR ".join(exclusions) if exclusions else "0"
+
+        # Delete oldest events in batches
+        while deleted < excess:
+            batch_size = min(policy.cleanup_batch_size, excess - deleted)
+            cur.execute(
+                f"""
+                DELETE FROM events
+                WHERE id IN (
+                    SELECT id FROM events
+                    WHERE NOT ({exclusion_clause})
+                    ORDER BY timestamp ASC
+                    LIMIT ?
+                )
+            """,
+                (batch_size,),
+            )
+            batch_deleted = cur.rowcount
+            self.conn.commit()
+
+            if batch_deleted == 0:
+                break
+            deleted += batch_deleted
+
+        return deleted
+
+    def get_event_count(self) -> int:
+        """Get the total number of events."""
+        cur = self.conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM events")
+        return cur.fetchone()[0]
+
+    def get_oldest_event_date(self) -> datetime | None:
+        """Get the timestamp of the oldest event."""
+        cur = self.conn.cursor()
+        cur.execute("SELECT MIN(timestamp) FROM events")
+        result = cur.fetchone()[0]
+        return parse_datetime(result) if result else None
+
+    def vacuum(self):
+        """Compact the database after deletions."""
+        self.conn.execute("VACUUM")
+
+    # ═══════════════════════════════════════════════════════════
+    # CLOSE
     # ═══════════════════════════════════════════════════════════
 
     def close(self):

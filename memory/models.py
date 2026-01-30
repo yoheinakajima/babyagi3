@@ -40,6 +40,14 @@ class Event:
 
     created_at: datetime = field(default_factory=datetime.now)
 
+    def __repr__(self) -> str:
+        content_preview = self.content[:50] + "..." if len(self.content) > 50 else self.content
+        return (
+            f"Event(id={self.id[:8]}..., type={self.event_type}, "
+            f"channel={self.channel}, direction={self.direction}, "
+            f"content='{content_preview}')"
+        )
+
 
 @dataclass
 class Entity:
@@ -75,6 +83,12 @@ class Entity:
     created_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)
 
+    def __repr__(self) -> str:
+        return (
+            f"Entity(id={self.id[:8]}..., name='{self.name}', "
+            f"type={self.type}, events={self.event_count})"
+        )
+
 
 @dataclass
 class Edge:
@@ -98,6 +112,12 @@ class Edge:
 
     created_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)
+
+    def __repr__(self) -> str:
+        return (
+            f"Edge(id={self.id[:8]}..., relation='{self.relation}', "
+            f"type={self.relation_type}, strength={self.strength:.2f})"
+        )
 
 
 @dataclass
@@ -124,6 +144,13 @@ class Topic:
 
     created_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)
+
+    def __repr__(self) -> str:
+        keywords_str = ", ".join(self.keywords[:3]) if self.keywords else "none"
+        return (
+            f"Topic(id={self.id[:8]}..., label='{self.label}', "
+            f"events={self.event_count}, keywords=[{keywords_str}])"
+        )
 
 
 @dataclass
@@ -165,6 +192,13 @@ class Task:
     started_at: datetime | None = None
     completed_at: datetime | None = None
 
+    def __repr__(self) -> str:
+        title_preview = self.title[:30] + "..." if len(self.title) > 30 else self.title
+        return (
+            f"Task(id={self.id[:8]}..., title='{title_preview}', "
+            f"status={self.status})"
+        )
+
 
 @dataclass
 class SummaryNode:
@@ -197,6 +231,14 @@ class SummaryNode:
     created_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)
 
+    def __repr__(self) -> str:
+        summary_preview = self.summary[:40] + "..." if len(self.summary) > 40 else self.summary
+        return (
+            f"SummaryNode(key='{self.key}', label='{self.label}', "
+            f"events={self.event_count}, stale={self.events_since_update}, "
+            f"summary='{summary_preview}')"
+        )
+
 
 @dataclass
 class AgentState:
@@ -222,6 +264,13 @@ class AgentState:
     state_updated_at: datetime | None = None
     created_at: datetime = field(default_factory=datetime.now)
 
+    def __repr__(self) -> str:
+        return (
+            f"AgentState(name='{self.name}', mood={self.mood}, "
+            f"focus={self.focus}, topics={len(self.current_topics)}, "
+            f"tasks={len(self.active_tasks)})"
+        )
+
 
 @dataclass
 class ToolRecord:
@@ -240,6 +289,12 @@ class ToolRecord:
 
     created_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)
+
+    def __repr__(self) -> str:
+        return (
+            f"ToolRecord(id='{self.id}', name='{self.name}', "
+            f"usage_count={self.usage_count})"
+        )
 
 
 # ═══════════════════════════════════════════════════════════

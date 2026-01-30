@@ -4,7 +4,9 @@ Extraction pipeline for the memory system.
 Extracts entities, edges, and topics from events using LLM.
 """
 
+import asyncio
 import json
+from dataclasses import dataclass
 from datetime import datetime
 
 from .embeddings import get_embedding
@@ -17,15 +19,33 @@ from .models import (
 )
 
 
+# ═══════════════════════════════════════════════════════════
+# EXTRACTION RETRY CONFIGURATION
+# ═══════════════════════════════════════════════════════════
+
+
+@dataclass
+class ExtractionConfig:
+    """Configuration for extraction with retry logic."""
+
+    max_retries: int = 3
+    retry_delay_seconds: float = 1.0
+    retry_backoff: float = 2.0  # Exponential backoff multiplier
+    retry_on_rate_limit: bool = True
+    retry_on_api_error: bool = True
+
+
 class ExtractionPipeline:
     """
     Extracts structured information from events.
 
     Uses LLM to identify entities, relationships, and topics.
+    Includes retry logic with exponential backoff.
     """
 
-    def __init__(self, store):
+    def __init__(self, store, config: ExtractionConfig | None = None):
         self.store = store
+        self.config = config or ExtractionConfig()
         self._client = None
 
     @property
@@ -42,50 +62,113 @@ class ExtractionPipeline:
         Extract entities, edges, and topics from an event.
 
         This is the main entry point for extraction.
+        Includes retry logic with exponential backoff.
         """
         # Skip if already extracted
         if event.extraction_status == "complete":
             return ExtractionResult()
 
+        # Check retry count
+        retry_count = self.store.get_extraction_retry_count(event.id)
+        if retry_count >= self.config.max_retries:
+            # Mark as permanently failed
+            self.store.update_event_extraction_status(event.id, "failed_permanent")
+            return ExtractionResult()
+
         # Mark as processing
         self.store.update_event_extraction_status(event.id, "processing")
 
-        try:
-            # Generate embedding if not present
-            if not event.content_embedding:
-                embedding = get_embedding(event.content)
-                self.store.update_event_embedding(event.id, embedding)
-                event.content_embedding = embedding
+        last_error = None
+        for attempt in range(self.config.max_retries):
+            try:
+                return await self._do_extract(event)
 
-            # Get context for extraction
-            context = await self._build_extraction_context(event)
+            except Exception as e:
+                last_error = e
+                error_str = str(e).lower()
 
-            # Run LLM extraction
-            result = await self._llm_extract(event, context)
+                # Check if we should retry
+                should_retry = False
+                if self.config.retry_on_rate_limit and "rate" in error_str:
+                    should_retry = True
+                elif self.config.retry_on_api_error and (
+                    "api" in error_str or "connection" in error_str or "timeout" in error_str
+                ):
+                    should_retry = True
 
-            # Process extracted entities
-            for extracted in result.entities:
-                await self._process_entity(extracted, event)
+                if should_retry and attempt < self.config.max_retries - 1:
+                    # Increment retry count
+                    self.store.increment_extraction_retry(event.id)
 
-            # Process extracted edges
-            for extracted in result.edges:
-                await self._process_edge(extracted, event)
+                    # Calculate delay with exponential backoff
+                    delay = self.config.retry_delay_seconds * (
+                        self.config.retry_backoff ** attempt
+                    )
+                    await asyncio.sleep(delay)
+                    continue
 
-            # Process extracted topics
-            for extracted in result.topics:
-                await self._process_topic(extracted, event)
+                # Don't retry, mark as failed
+                break
 
-            # Mark as complete
-            self.store.update_event_extraction_status(
-                event.id, "complete", datetime.now()
-            )
+        # All retries exhausted
+        self.store.update_event_extraction_status(event.id, "failed")
+        self.store.increment_extraction_retry(event.id)
+        raise last_error if last_error else Exception("Extraction failed")
 
-            return result
+    async def _do_extract(self, event: Event) -> ExtractionResult:
+        """Perform the actual extraction (called by extract with retry)."""
+        # Generate embedding if not present
+        if not event.content_embedding:
+            embedding = get_embedding(event.content)
+            self.store.update_event_embedding(event.id, embedding)
+            event.content_embedding = embedding
 
-        except Exception as e:
-            # Mark as failed
-            self.store.update_event_extraction_status(event.id, "failed")
-            raise e
+        # Get context for extraction
+        context = await self._build_extraction_context(event)
+
+        # Run LLM extraction
+        result = await self._llm_extract(event, context)
+
+        # Process extracted entities
+        for extracted in result.entities:
+            await self._process_entity(extracted, event)
+
+        # Process extracted edges
+        for extracted in result.edges:
+            await self._process_edge(extracted, event)
+
+        # Process extracted topics
+        for extracted in result.topics:
+            await self._process_topic(extracted, event)
+
+        # Mark as complete
+        self.store.update_event_extraction_status(
+            event.id, "complete", datetime.now()
+        )
+
+        return result
+
+    async def retry_failed(self, limit: int = 10) -> list[ExtractionResult]:
+        """
+        Retry extraction for failed events.
+
+        Returns list of successful extraction results.
+        """
+        failed_events = self.store.get_failed_extraction_events(
+            max_retries=self.config.max_retries, limit=limit
+        )
+
+        results = []
+        for event in failed_events:
+            try:
+                # Reset status to pending before retry
+                self.store.update_event_extraction_status(event.id, "pending")
+                result = await self.extract(event)
+                results.append(result)
+            except Exception as e:
+                print(f"Retry failed for event {event.id}: {e}")
+
+        return results
 
     async def _build_extraction_context(self, event: Event) -> dict:
         """Build context for extraction prompt."""
@@ -288,8 +371,8 @@ Extract entities, relationships, and topics from this event."""
             return
 
         # Create new entity
-        # Determine type cluster from type_raw
-        type_cluster = self._cluster_entity_type(extracted.type_raw)
+        # Determine type cluster from type_raw using LLM
+        type_cluster = await self._cluster_entity_type_llm(extracted.type_raw)
 
         # Generate embedding
         embed_text = f"{extracted.name} {extracted.type_raw}"
@@ -336,7 +419,7 @@ Extract entities, relationships, and topics from this event."""
 
         # Create new edge
         embedding = get_embedding(extracted.relation)
-        relation_type = self._cluster_relation_type(extracted.relation)
+        relation_type = await self._cluster_relation_type_llm(extracted.relation)
 
         self.store.create_edge(
             source_entity_id=source.id,
@@ -373,143 +456,176 @@ Extract entities, relationships, and topics from this event."""
         # Link event to topic
         self.store.link_event_topic(event.id, topic.id, extracted.relevance)
 
-    def _cluster_entity_type(self, type_raw: str) -> str:
-        """Map raw entity type to cluster."""
-        type_lower = type_raw.lower()
+    # Type clustering constants
+    ENTITY_TYPE_CLUSTERS = ["person", "org", "tool", "location", "concept"]
+    RELATION_TYPE_CLUSTERS = ["professional", "financial", "social", "technical", "other"]
 
-        # Person types
-        if any(
-            w in type_lower
-            for w in [
-                "person",
-                "investor",
-                "founder",
-                "ceo",
-                "engineer",
-                "developer",
-                "designer",
-                "manager",
-                "analyst",
-                "consultant",
-                "executive",
-                "employee",
-                "colleague",
-                "friend",
-                "contact",
-            ]
-        ):
-            return "person"
+    # Cache for type clustering results to avoid repeated LLM calls
+    _type_cache: dict[str, str] = {}
+    _relation_cache: dict[str, str] = {}
 
-        # Organization types
-        if any(
-            w in type_lower
-            for w in [
-                "company",
-                "organization",
-                "startup",
-                "corporation",
-                "firm",
-                "agency",
-                "institution",
-                "fund",
-                "vc",
-                "venture",
-                "bank",
-                "university",
-            ]
-        ):
-            return "org"
+    async def _cluster_entity_type_llm(self, type_raw: str) -> str:
+        """Map raw entity type to cluster using LLM."""
+        # Check cache first
+        cache_key = type_raw.lower().strip()
+        if cache_key in self._type_cache:
+            return self._type_cache[cache_key]
 
-        # Tool types
-        if any(
-            w in type_lower
-            for w in [
-                "tool",
-                "software",
-                "app",
-                "platform",
-                "library",
-                "framework",
-                "api",
-                "service",
-                "product",
-            ]
-        ):
-            return "tool"
+        # Try quick heuristics first for obvious cases
+        quick_result = self._quick_entity_type_match(type_raw)
+        if quick_result:
+            self._type_cache[cache_key] = quick_result
+            return quick_result
 
-        # Location types
-        if any(
-            w in type_lower
-            for w in ["city", "country", "location", "place", "region", "office"]
-        ):
-            return "location"
+        # Use LLM for ambiguous cases
+        prompt = f"""Classify this entity type into exactly one category.
 
-        # Default to concept
+Entity type: "{type_raw}"
+
+Categories:
+- person: Individual humans (investors, founders, engineers, friends, etc.)
+- org: Organizations, companies, institutions, funds
+- tool: Software, apps, platforms, libraries, APIs, services
+- location: Cities, countries, regions, physical places
+- concept: Ideas, topics, abstract things, everything else
+
+Respond with only the category name, nothing else."""
+
+        try:
+            response = self.client.messages.create(
+                model="claude-haiku-3-5-20241022",
+                max_tokens=20,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            result = response.content[0].text.strip().lower()
+
+            # Validate result
+            if result in self.ENTITY_TYPE_CLUSTERS:
+                self._type_cache[cache_key] = result
+                return result
+        except Exception:
+            pass
+
+        # Fallback to concept
+        self._type_cache[cache_key] = "concept"
         return "concept"
 
-    def _cluster_relation_type(self, relation: str) -> str:
-        """Map raw relation to cluster."""
+    async def _cluster_relation_type_llm(self, relation: str) -> str:
+        """Map raw relation to cluster using LLM."""
+        # Check cache first
+        cache_key = relation.lower().strip()
+        if cache_key in self._relation_cache:
+            return self._relation_cache[cache_key]
+
+        # Try quick heuristics first
+        quick_result = self._quick_relation_type_match(relation)
+        if quick_result:
+            self._relation_cache[cache_key] = quick_result
+            return quick_result
+
+        # Use LLM for ambiguous cases
+        prompt = f"""Classify this relationship type into exactly one category.
+
+Relationship: "{relation}"
+
+Categories:
+- professional: Work, employment, business partnerships, leadership
+- financial: Investment, funding, purchases, ownership, transactions
+- social: Friendships, family, personal connections, introductions
+- technical: Software dependencies, integrations, uses, creates
+- other: Everything else
+
+Respond with only the category name, nothing else."""
+
+        try:
+            response = self.client.messages.create(
+                model="claude-haiku-3-5-20241022",
+                max_tokens=20,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            result = response.content[0].text.strip().lower()
+
+            # Validate result
+            if result in self.RELATION_TYPE_CLUSTERS:
+                self._relation_cache[cache_key] = result
+                return result
+        except Exception:
+            pass
+
+        # Fallback to other
+        self._relation_cache[cache_key] = "other"
+        return "other"
+
+    def _quick_entity_type_match(self, type_raw: str) -> str | None:
+        """Quick heuristic matching for obvious entity types."""
+        type_lower = type_raw.lower()
+
+        person_keywords = ["person", "human", "individual", "investor", "founder", "ceo",
+                          "engineer", "developer", "designer", "manager", "employee",
+                          "colleague", "friend", "contact", "user", "customer"]
+        org_keywords = ["company", "organization", "org", "startup", "corporation",
+                       "firm", "agency", "institution", "fund", "vc", "venture",
+                       "bank", "university", "school", "government"]
+        tool_keywords = ["tool", "software", "app", "application", "platform",
+                        "library", "framework", "api", "service", "product", "website"]
+        location_keywords = ["city", "country", "location", "place", "region",
+                            "office", "building", "address", "state", "town"]
+
+        for kw in person_keywords:
+            if kw in type_lower:
+                return "person"
+        for kw in org_keywords:
+            if kw in type_lower:
+                return "org"
+        for kw in tool_keywords:
+            if kw in type_lower:
+                return "tool"
+        for kw in location_keywords:
+            if kw in type_lower:
+                return "location"
+
+        return None  # Need LLM for this one
+
+    def _quick_relation_type_match(self, relation: str) -> str | None:
+        """Quick heuristic matching for obvious relation types."""
         relation_lower = relation.lower()
 
-        # Professional relationships
-        if any(
-            w in relation_lower
-            for w in [
-                "works",
-                "employed",
-                "hired",
-                "manages",
-                "reports",
-                "colleague",
-                "team",
-                "founded",
-                "ceo",
-                "leads",
-            ]
-        ):
-            return "professional"
+        professional_keywords = ["works", "employed", "hired", "manages", "reports",
+                                "colleague", "team", "founded", "ceo", "leads",
+                                "employee", "boss", "coworker", "partner"]
+        financial_keywords = ["invest", "fund", "paid", "bought", "sold", "owns",
+                             "acquired", "raised", "valued", "purchased", "financed"]
+        social_keywords = ["knows", "friend", "met", "introduced", "connected",
+                          "family", "married", "related", "sibling", "parent"]
+        technical_keywords = ["uses", "built", "created", "developed", "integrates",
+                             "depends", "implements", "extends", "imports"]
 
-        # Financial relationships
-        if any(
-            w in relation_lower
-            for w in [
-                "invest",
-                "fund",
-                "paid",
-                "bought",
-                "sold",
-                "owns",
-                "acquired",
-                "raised",
-                "valued",
-            ]
-        ):
-            return "financial"
+        for kw in professional_keywords:
+            if kw in relation_lower:
+                return "professional"
+        for kw in financial_keywords:
+            if kw in relation_lower:
+                return "financial"
+        for kw in social_keywords:
+            if kw in relation_lower:
+                return "social"
+        for kw in technical_keywords:
+            if kw in relation_lower:
+                return "technical"
 
-        # Social relationships
-        if any(
-            w in relation_lower
-            for w in [
-                "knows",
-                "friend",
-                "met",
-                "introduced",
-                "connected",
-                "family",
-                "married",
-            ]
-        ):
-            return "social"
+        return None  # Need LLM for this one
 
-        # Technical relationships
-        if any(
-            w in relation_lower
-            for w in ["uses", "built", "created", "developed", "integrates", "depends"]
-        ):
-            return "technical"
+    def _cluster_entity_type(self, type_raw: str) -> str:
+        """Synchronous wrapper for entity type clustering."""
+        # For sync contexts, use heuristics only
+        quick_result = self._quick_entity_type_match(type_raw)
+        return quick_result or "concept"
 
-        # Default
-        return "other"
+    def _cluster_relation_type(self, relation: str) -> str:
+        """Synchronous wrapper for relation type clustering."""
+        # For sync contexts, use heuristics only
+        quick_result = self._quick_relation_type_match(relation)
+        return quick_result or "other"
 
 
 async def extract_batch(
