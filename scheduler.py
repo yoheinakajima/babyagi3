@@ -595,9 +595,9 @@ class Scheduler:
             if task.schedule.kind == "at" and task.next_run_at is None:
                 task.enabled = False
 
-            # Persist
-            self.store.save_tasks(self.tasks)
-            self.store.append_run(record)
+            # Persist in thread pool to avoid blocking the event loop
+            await asyncio.to_thread(self.store.save_tasks, self.tasks)
+            await asyncio.to_thread(self.store.append_run, record)
 
             self._running_tasks.discard(task.id)
 

@@ -227,6 +227,10 @@ class Agent(EventEmitter):
         self._running_objectives: set[str] = set()
         self._lock = asyncio.Lock()
 
+        # Reference to main event loop for tools running in thread pool
+        # Set when first async operation runs
+        self._main_loop: asyncio.AbstractEventLoop | None = None
+
         # Per-thread locks for serializing operations on same thread_id
         # Prevents race conditions when multiple sources (scheduler, email, etc.)
         # access the same conversation thread concurrently
@@ -434,6 +438,10 @@ Work autonomously. Use tools as needed. When done, provide a brief summary of wh
             This prevents message interleaving when concurrent requests
             (e.g., scheduled task + email) target the same thread.
         """
+        # Capture main event loop for tools that need it
+        if self._main_loop is None:
+            self._main_loop = asyncio.get_running_loop()
+
         # Acquire per-thread lock to serialize operations on this thread
         async with self._get_thread_lock(thread_id):
             context = context or {"channel": "cli", "is_owner": True}
@@ -460,7 +468,7 @@ Work autonomously. Use tools as needed. When done, provide a brief summary of wh
                 if response.stop_reason == "end_turn":
                     return self._extract_text(response)
 
-                # Execute tools
+                # Execute tools (in thread pool to avoid blocking event loop)
                 tool_results = []
                 for block in response.content:
                     if block.type == "tool_use":
@@ -471,7 +479,11 @@ Work autonomously. Use tools as needed. When done, provide a brief summary of wh
                         })
 
                         start_time = time.time()
-                        result = self.tools[block.name].execute(block.input, self)
+                        # Run tool in thread pool to prevent blocking the event loop
+                        # This allows scheduler and other async tasks to run during tool execution
+                        result = await asyncio.to_thread(
+                            self.tools[block.name].execute, block.input, self
+                        )
                         duration_ms = int((time.time() - start_time) * 1000)
 
                         # Emit tool_end event
@@ -898,19 +910,19 @@ def _schedule_tool(agent: Agent) -> Tool:
 
         elif action == "run":
             task_id = params["id"]
-            force = params.get("force", True)
+            task = ag.scheduler.get(task_id)
+            if not task:
+                return {"error": f"Task {task_id} not found"}
 
-            async def do_run():
-                return await ag.scheduler.run_now(task_id, force=force)
-
-            try:
-                loop = asyncio.get_running_loop()
-                import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor() as pool:
-                    result = pool.submit(asyncio.run, do_run()).result()
-                return result
-            except RuntimeError:
-                return asyncio.run(do_run())
+            # Spawn task execution in background (don't block waiting for result)
+            # This avoids creating new event loops which can cause deadlocks
+            asyncio.create_task(ag.scheduler.run_now(task_id, force=True))
+            return {
+                "status": "triggered",
+                "task_id": task_id,
+                "name": task.name,
+                "message": "Task execution started in background"
+            }
 
         elif action == "history":
             task_id = params["id"]
@@ -1237,27 +1249,22 @@ def _send_message_tool(agent: Agent) -> Tool:
             if params.get(key):
                 kwargs[key] = params[key]
 
-        # Send asynchronously
+        # Send via the main event loop (tools run in thread pool)
         async def do_send():
-            return await sender.send(to, content, **kwargs)
-
-        try:
-            # Try to get running loop, otherwise create one
             try:
-                loop = asyncio.get_running_loop()
-                # We're in an async context, create a task
-                future = asyncio.ensure_future(do_send())
-                # This is tricky - we can't await here directly
-                # For now, use run_coroutine_threadsafe or similar
-                import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor() as pool:
-                    result = pool.submit(asyncio.run, do_send()).result()
-                return result
-            except RuntimeError:
-                # No running loop, we can use asyncio.run
-                return asyncio.run(do_send())
+                return await sender.send(to, content, **kwargs)
+            except Exception as e:
+                return {"error": str(e)}
+
+        # Use the agent's main loop to schedule the async send
+        if ag._main_loop is None:
+            return {"error": "Agent not initialized (no event loop)"}
+
+        future = asyncio.run_coroutine_threadsafe(do_send(), ag._main_loop)
+        try:
+            return future.result(timeout=30)
         except Exception as e:
-            return {"error": str(e)}
+            return {"error": f"Send failed: {e}"}
 
     return Tool(
         name="send_message",
