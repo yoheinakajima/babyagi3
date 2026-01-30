@@ -140,6 +140,14 @@ Be concise. Mention what you can help with based on available tools. If any tool
             # Handle Ctrl+D
             console.system("\nGoodbye!")
             break
+    
+    # Cleanup scheduler task if running
+    if scheduler_task:
+        scheduler_task.cancel()
+        try:
+            await scheduler_task
+        except asyncio.CancelledError:
+            pass
 
 
 def _handle_verbose_command(command: str):
