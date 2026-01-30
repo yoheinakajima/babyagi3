@@ -169,13 +169,13 @@ class Console:
 
     def banner(self, text: str, width: int = 40):
         """Print a banner/header."""
-        print(self._colorize(text, Colors.BOLD, Colors.BLUE))
-        print(self._colorize("=" * width, Colors.DIM, Colors.BLUE))
+        print(self._colorize(text, Colors.BOLD, Colors.BLUE), flush=True)
+        print(self._colorize("=" * width, Colors.DIM, Colors.BLUE), flush=True)
 
     def user(self, text: str, prompt: str = "You"):
         """Print user input."""
         prefix = self._colorize(f"{prompt}: ", Colors.BOLD, Colors.GREEN)
-        print(f"{prefix}{text}")
+        print(f"{prefix}{text}", flush=True)
 
     def user_prompt(self) -> str:
         """Get styled user input prompt string."""
@@ -184,23 +184,23 @@ class Console:
     def agent(self, text: str, prefix: str = "Assistant"):
         """Print agent response."""
         styled_prefix = self._colorize(f"{prefix}: ", Colors.BOLD, Colors.CYAN)
-        print(f"{styled_prefix}{text}\n")
+        print(f"{styled_prefix}{text}\n", flush=True)
 
     def system(self, text: str):
         """Print system message (info, status)."""
-        print(self._colorize(text, Colors.BLUE))
+        print(self._colorize(text, Colors.BLUE), flush=True)
 
     def error(self, text: str):
         """Print error message."""
-        print(self._colorize(f"Error: {text}", Colors.BOLD, Colors.RED))
+        print(self._colorize(f"Error: {text}", Colors.BOLD, Colors.RED), flush=True)
 
     def success(self, text: str):
         """Print success message."""
-        print(self._colorize(text, Colors.GREEN))
+        print(self._colorize(text, Colors.GREEN), flush=True)
 
     def warning(self, text: str):
         """Print warning message."""
-        print(self._colorize(f"Warning: {text}", Colors.YELLOW))
+        print(self._colorize(f"Warning: {text}", Colors.YELLOW), flush=True)
 
     # -------------------------------------------------------------------------
     # Verbose output methods
@@ -233,7 +233,7 @@ class Console:
         else:
             styled = self._colorize(f"    {text}", Colors.DIM, Colors.BRIGHT_BLACK)
 
-        print(styled)
+        print(styled, flush=True)
 
     def tool_start(self, name: str, inputs: dict[str, Any] = None):
         """Log tool execution start."""

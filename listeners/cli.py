@@ -88,8 +88,10 @@ Be concise. Mention what you can help with based on available tools. If any tool
     # Main REPL loop
     while True:
         try:
-            # Use styled prompt
-            user_input = await asyncio.to_thread(input, console.user_prompt())
+            # Print prompt separately with flush, then read input
+            # This ensures the prompt appears even in buffered environments
+            print(console.user_prompt(), end="", flush=True)
+            user_input = await asyncio.to_thread(input)
             user_input = user_input.strip()
 
             # Check for verbose toggle commands
