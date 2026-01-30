@@ -14,6 +14,7 @@ Chat continues while objectives work. Objectives can spawn sub-objectives.
 
 import asyncio
 import json
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -25,6 +26,7 @@ from scheduler import (
     Scheduler, ScheduledTask, Schedule, SchedulerStore,
     create_task, parse_schedule, RunRecord
 )
+from utils.events import EventEmitter
 
 
 def json_serialize(obj):
@@ -125,7 +127,7 @@ class Tool:
         return check_requirements(self.packages, self.env)
 
 
-class Agent:
+class Agent(EventEmitter):
     """
     The agent: a loop that processes messages, with support for background objectives.
 
@@ -146,9 +148,19 @@ class Agent:
     - Listeners (input): Receive messages from CLI, email, voice, etc.
     - Senders (output): Send messages via any channel
     - Context: Each message carries channel info and owner status
+
+    Events emitted:
+    - tool_start: {"name": str, "input": dict}
+    - tool_end: {"name": str, "result": any, "duration_ms": int}
+    - objective_start: {"id": str, "goal": str}
+    - objective_end: {"id": str, "status": str, "result": str}
+    - task_start: {"id": str, "name": str, "goal": str}
+    - task_end: {"id": str, "status": str, "duration_ms": int}
     """
 
     def __init__(self, model: str = "claude-sonnet-4-20250514", load_tools: bool = True, config: dict = None):
+        self.__init_events__()  # Initialize event system
+
         self.client = anthropic.Anthropic()
         self.model = model
         self.tools: dict[str, Tool] = {}
@@ -256,6 +268,15 @@ class Agent:
 
     async def _execute_scheduled_task(self, task: ScheduledTask) -> str:
         """Execute a scheduled task - runs as the agent with its own thread."""
+        # Emit task_start event
+        self.emit("task_start", {
+            "id": task.id,
+            "name": task.name,
+            "goal": task.goal
+        })
+
+        start_time = time.time()
+
         prompt = f"""Execute this scheduled task: {task.goal}
 
 Task: {task.name}
@@ -263,8 +284,32 @@ Schedule: {task.schedule.human_readable()}
 
 Work autonomously. Use tools as needed. When done, provide a brief summary of what you accomplished."""
 
-        result = await self.run_async(prompt, task.thread_id)
-        return result
+        try:
+            result = await self.run_async(prompt, task.thread_id)
+            duration_ms = int((time.time() - start_time) * 1000)
+
+            # Emit task_end event (success)
+            self.emit("task_end", {
+                "id": task.id,
+                "name": task.name,
+                "status": "completed",
+                "duration_ms": duration_ms
+            })
+
+            return result
+        except Exception as e:
+            duration_ms = int((time.time() - start_time) * 1000)
+
+            # Emit task_end event (failure)
+            self.emit("task_end", {
+                "id": task.id,
+                "name": task.name,
+                "status": "failed",
+                "error": str(e),
+                "duration_ms": duration_ms
+            })
+
+            raise
 
     def _load_external_tools(self):
         """Load tools from the tools/ folder."""
@@ -329,7 +374,23 @@ Work autonomously. Use tools as needed. When done, provide a brief summary of wh
             tool_results = []
             for block in response.content:
                 if block.type == "tool_use":
+                    # Emit tool_start event
+                    self.emit("tool_start", {
+                        "name": block.name,
+                        "input": block.input
+                    })
+
+                    start_time = time.time()
                     result = self.tools[block.name].execute(block.input, self)
+                    duration_ms = int((time.time() - start_time) * 1000)
+
+                    # Emit tool_end event
+                    self.emit("tool_end", {
+                        "name": block.name,
+                        "result": result,
+                        "duration_ms": duration_ms
+                    })
+
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": block.id,
@@ -350,6 +411,9 @@ Work autonomously. Use tools as needed. When done, provide a brief summary of wh
             self._running_objectives.add(objective_id)
             obj.status = "running"
 
+        # Emit objective_start event
+        self.emit("objective_start", {"id": objective_id, "goal": obj.goal})
+
         try:
             # Run the objective with its own thread
             prompt = f"""Complete this objective: {obj.goal}
@@ -360,9 +424,23 @@ Work autonomously. Use tools as needed. When done, provide a final summary."""
             obj.result = result
             obj.status = "completed"
             obj.completed = datetime.now().isoformat()
+
+            # Emit objective_end event (success)
+            self.emit("objective_end", {
+                "id": objective_id,
+                "status": "completed",
+                "result": result
+            })
         except Exception as e:
             obj.status = "failed"
             obj.error = str(e)
+
+            # Emit objective_end event (failure)
+            self.emit("objective_end", {
+                "id": objective_id,
+                "status": "failed",
+                "error": str(e)
+            })
         finally:
             self._running_objectives.discard(objective_id)
 

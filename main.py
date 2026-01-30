@@ -17,12 +17,22 @@ Channels:
 Configuration:
     Set options in config.yaml or via environment variables.
     See config.yaml for all available options.
+
+Verbose Output:
+    Control with BABYAGI_VERBOSE environment variable or config.yaml:
+    - 0/off: No verbose output (default)
+    - 1/light: Key operations (tool names, task starts)
+    - 2/deep: Everything (inputs, outputs, full details)
+
+    Runtime toggle: /verbose [off|light|deep]
 """
 
 import asyncio
 import logging
 import os
 import sys
+
+from utils.console import console
 
 # Configure logging
 logging.basicConfig(
@@ -53,8 +63,8 @@ def main():
             asyncio.run(run_cli_only())
 
         else:
-            print(f"Unknown command: {command}")
-            print("Usage: python main.py [serve|channels|cli]")
+            console.error(f"Unknown command: {command}")
+            console.system("Usage: python main.py [serve|channels|cli]")
             sys.exit(1)
     else:
         # Default: CLI only (original behavior)
@@ -66,12 +76,16 @@ async def run_cli_only():
     from agent import Agent
     from listeners.cli import run_cli_listener
 
-    print("BabyAGI v0.3.0")
-    print("=" * 40)
+    console.banner("BabyAGI v0.3.0")
 
     # Load config
     from config import load_config
     config = load_config()
+
+    # Configure verbose level from config (env var takes precedence)
+    if not os.environ.get("BABYAGI_VERBOSE"):
+        verbose_config = config.get("verbose", "off")
+        console.set_verbose(verbose_config)
 
     # Initialize agent
     agent = Agent(config=config)
@@ -82,7 +96,7 @@ async def run_cli_only():
     try:
         await run_cli_listener(agent, config.get("channels", {}).get("cli", {}))
     except KeyboardInterrupt:
-        print("\nGoodbye!")
+        console.system("\nGoodbye!")
     finally:
         scheduler_task.cancel()
 
@@ -92,11 +106,15 @@ async def run_all_channels():
     from agent import Agent
     from config import load_config, is_channel_enabled, get_channel_config
 
-    print("BabyAGI v0.3.0 - Multi-Channel Mode")
-    print("=" * 40)
+    console.banner("BabyAGI v0.3.0 - Multi-Channel Mode")
 
     # Load config
     config = load_config()
+
+    # Configure verbose level from config (env var takes precedence)
+    if not os.environ.get("BABYAGI_VERBOSE"):
+        verbose_config = config.get("verbose", "off")
+        console.set_verbose(verbose_config)
 
     # Initialize agent with config
     agent = Agent(config=config)
@@ -139,8 +157,8 @@ async def run_all_channels():
     # Log active channels
     active_channels = [name for name in ["cli", "email", "voice"]
                       if is_channel_enabled(config, name)]
-    print(f"\nActive channels: {', '.join(active_channels)}")
-    print("Press Ctrl+C to stop\n")
+    console.system(f"\nActive channels: {', '.join(active_channels)}")
+    console.system("Press Ctrl+C to stop\n")
 
     # Run all tasks
     try:
