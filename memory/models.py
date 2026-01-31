@@ -274,7 +274,11 @@ class AgentState:
 
 @dataclass
 class ToolRecord:
-    """Record of a tool for tracking usage and summaries."""
+    """Record of a tool for tracking usage and summaries.
+
+    DEPRECATED: Use ToolDefinition for new code. This class is kept
+    for backward compatibility with existing database records.
+    """
 
     id: str  # Same as tool_id in events
     name: str
@@ -294,6 +298,81 @@ class ToolRecord:
         return (
             f"ToolRecord(id='{self.id}', name='{self.name}', "
             f"usage_count={self.usage_count})"
+        )
+
+
+@dataclass
+class ToolDefinition:
+    """A persisted tool definition - enables agent self-improvement.
+
+    This stores everything needed to reconstruct a dynamically-created tool
+    after restart, plus execution statistics for monitoring and debugging.
+
+    Tools are also represented as Entities in the knowledge graph, allowing
+    the agent to query "what tools do I have?" and track relationships.
+    """
+
+    id: str
+    name: str  # Unique identifier (tool name)
+    description: str
+
+    # Definition (what makes it executable)
+    source_code: str | None = None  # Python code for dynamic tools
+    parameters: dict = field(default_factory=dict)  # JSON schema for input
+    packages: list[str] = field(default_factory=list)  # Required packages
+    env: list[str] = field(default_factory=list)  # Required env vars
+    tool_var_name: str | None = None  # Variable name in source code (e.g., "my_tool")
+
+    # Category for organization
+    category: str = "custom"  # "core", "builtin", "custom", "search", "communication", etc.
+
+    # State
+    is_enabled: bool = True
+    is_dynamic: bool = True  # False for built-in/static tools
+
+    # Execution statistics
+    usage_count: int = 0
+    success_count: int = 0
+    error_count: int = 0
+    last_used_at: datetime | None = None
+    last_error: str | None = None
+    last_error_at: datetime | None = None
+    avg_duration_ms: float = 0.0
+    total_duration_ms: float = 0.0  # For calculating running average
+
+    # Graph integration
+    entity_id: str | None = None  # Links to Entity (type="tool")
+    summary_node_id: str | None = None
+
+    # Versioning
+    version: int = 1
+
+    # Provenance
+    created_by_event_id: str | None = None  # Which event triggered creation
+
+    created_at: datetime = field(default_factory=datetime.now)
+    updated_at: datetime = field(default_factory=datetime.now)
+
+    @property
+    def success_rate(self) -> float:
+        """Calculate success rate as a percentage."""
+        if self.usage_count == 0:
+            return 100.0
+        return (self.success_count / self.usage_count) * 100.0
+
+    @property
+    def is_healthy(self) -> bool:
+        """Check if tool has acceptable error rate (< 50% errors)."""
+        if self.usage_count < 3:
+            return True  # Not enough data
+        return self.success_rate >= 50.0
+
+    def __repr__(self) -> str:
+        status = "enabled" if self.is_enabled else "disabled"
+        health = "healthy" if self.is_healthy else "unhealthy"
+        return (
+            f"ToolDefinition(name='{self.name}', {status}, {health}, "
+            f"usage={self.usage_count}, success_rate={self.success_rate:.1f}%)"
         )
 
 

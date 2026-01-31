@@ -22,6 +22,7 @@ from .models import (
     EventTopic,
     SummaryNode,
     Task,
+    ToolDefinition,
     ToolRecord,
     Topic,
 )
@@ -304,7 +305,7 @@ class MemoryStore:
         """
         )
 
-        # Tools
+        # Tools (legacy - kept for backward compatibility)
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS tools (
@@ -317,6 +318,57 @@ class MemoryStore:
                 summary_node_id TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
+            )
+        """
+        )
+
+        # Tool Definitions - full tool persistence for self-improvement
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tool_definitions (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE,
+                description TEXT NOT NULL,
+
+                -- Definition (what makes it executable)
+                source_code TEXT,
+                parameters TEXT,
+                packages TEXT,
+                env TEXT,
+                tool_var_name TEXT,
+
+                -- Category
+                category TEXT DEFAULT 'custom',
+
+                -- State
+                is_enabled INTEGER DEFAULT 1,
+                is_dynamic INTEGER DEFAULT 1,
+
+                -- Execution statistics
+                usage_count INTEGER DEFAULT 0,
+                success_count INTEGER DEFAULT 0,
+                error_count INTEGER DEFAULT 0,
+                last_used_at TEXT,
+                last_error TEXT,
+                last_error_at TEXT,
+                avg_duration_ms REAL DEFAULT 0,
+                total_duration_ms REAL DEFAULT 0,
+
+                -- Graph integration
+                entity_id TEXT,
+                summary_node_id TEXT,
+
+                -- Versioning
+                version INTEGER DEFAULT 1,
+
+                -- Provenance
+                created_by_event_id TEXT,
+
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+
+                FOREIGN KEY (entity_id) REFERENCES entities(id),
+                FOREIGN KEY (summary_node_id) REFERENCES summary_nodes(id)
             )
         """
         )
@@ -369,6 +421,12 @@ class MemoryStore:
             "CREATE INDEX IF NOT EXISTS idx_summary_nodes_type ON summary_nodes(node_type)",
             "CREATE INDEX IF NOT EXISTS idx_summary_nodes_parent ON summary_nodes(parent_id)",
             "CREATE INDEX IF NOT EXISTS idx_summary_nodes_stale ON summary_nodes(events_since_update DESC)",
+            # Tool definitions indices
+            "CREATE INDEX IF NOT EXISTS idx_tool_definitions_name ON tool_definitions(name)",
+            "CREATE INDEX IF NOT EXISTS idx_tool_definitions_enabled ON tool_definitions(is_enabled)",
+            "CREATE INDEX IF NOT EXISTS idx_tool_definitions_dynamic ON tool_definitions(is_dynamic)",
+            "CREATE INDEX IF NOT EXISTS idx_tool_definitions_category ON tool_definitions(category)",
+            "CREATE INDEX IF NOT EXISTS idx_tool_definitions_error_count ON tool_definitions(error_count DESC)",
         ]
 
         for idx in indices:
@@ -1538,6 +1596,501 @@ class MemoryStore:
             usage_count=row["usage_count"],
             last_used_at=parse_datetime(row["last_used_at"]),
             summary_node_id=row["summary_node_id"],
+            created_at=parse_datetime(row["created_at"]),
+            updated_at=parse_datetime(row["updated_at"]),
+        )
+
+    # ═══════════════════════════════════════════════════════════
+    # TOOL DEFINITIONS (Full Persistence for Self-Improvement)
+    # ═══════════════════════════════════════════════════════════
+
+    def save_tool_definition(
+        self,
+        name: str,
+        description: str,
+        parameters: dict,
+        source_code: str | None = None,
+        packages: list[str] | None = None,
+        env: list[str] | None = None,
+        tool_var_name: str | None = None,
+        category: str = "custom",
+        is_dynamic: bool = True,
+        created_by_event_id: str | None = None,
+    ) -> ToolDefinition:
+        """
+        Save or update a tool definition.
+
+        If a tool with this name exists, updates it (increments version).
+        Otherwise creates a new tool definition.
+        """
+        cur = self.conn.cursor()
+        now = now_iso()
+
+        # Check if tool already exists
+        cur.execute("SELECT * FROM tool_definitions WHERE name = ?", (name,))
+        existing = cur.fetchone()
+
+        if existing:
+            # Update existing - increment version
+            new_version = existing["version"] + 1
+            cur.execute(
+                """
+                UPDATE tool_definitions SET
+                    description = ?,
+                    source_code = ?,
+                    parameters = ?,
+                    packages = ?,
+                    env = ?,
+                    tool_var_name = ?,
+                    category = ?,
+                    is_dynamic = ?,
+                    version = ?,
+                    updated_at = ?
+                WHERE name = ?
+            """,
+                (
+                    description,
+                    source_code,
+                    serialize_json(parameters),
+                    serialize_json(packages or []),
+                    serialize_json(env or []),
+                    tool_var_name,
+                    category,
+                    1 if is_dynamic else 0,
+                    new_version,
+                    now,
+                    name,
+                ),
+            )
+            self.conn.commit()
+            return self.get_tool_definition(name)
+
+        # Create new
+        tool_id = generate_id()
+
+        # Create summary node for tool
+        summary_node = self.create_summary_node(
+            node_type="tool",
+            key=f"tool:{name}",
+            label=name,
+            parent_key=f"tool_category:{category}",
+        )
+
+        # Create entity for tool (tools are first-class entities in the graph)
+        entity = self.create_entity(
+            name=name,
+            type="tool",
+            type_raw=category,
+            description=description,
+        )
+
+        cur.execute(
+            """
+            INSERT INTO tool_definitions (
+                id, name, description, source_code, parameters, packages, env,
+                tool_var_name, category, is_enabled, is_dynamic,
+                entity_id, summary_node_id, created_by_event_id,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
+        """,
+            (
+                tool_id,
+                name,
+                description,
+                source_code,
+                serialize_json(parameters),
+                serialize_json(packages or []),
+                serialize_json(env or []),
+                tool_var_name,
+                category,
+                1 if is_dynamic else 0,
+                entity.id,
+                summary_node.id,
+                created_by_event_id,
+                now,
+                now,
+            ),
+        )
+        self.conn.commit()
+
+        return ToolDefinition(
+            id=tool_id,
+            name=name,
+            description=description,
+            source_code=source_code,
+            parameters=parameters,
+            packages=packages or [],
+            env=env or [],
+            tool_var_name=tool_var_name,
+            category=category,
+            is_enabled=True,
+            is_dynamic=is_dynamic,
+            entity_id=entity.id,
+            summary_node_id=summary_node.id,
+            created_by_event_id=created_by_event_id,
+            created_at=parse_datetime(now),
+            updated_at=parse_datetime(now),
+        )
+
+    def get_tool_definition(self, name: str) -> ToolDefinition | None:
+        """Get a tool definition by name."""
+        cur = self.conn.cursor()
+        cur.execute("SELECT * FROM tool_definitions WHERE name = ?", (name,))
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return self._row_to_tool_definition(row)
+
+    def get_tool_definition_by_id(self, tool_id: str) -> ToolDefinition | None:
+        """Get a tool definition by ID."""
+        cur = self.conn.cursor()
+        cur.execute("SELECT * FROM tool_definitions WHERE id = ?", (tool_id,))
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return self._row_to_tool_definition(row)
+
+    def get_all_tool_definitions(self, include_disabled: bool = False) -> list[ToolDefinition]:
+        """Get all tool definitions."""
+        cur = self.conn.cursor()
+        if include_disabled:
+            cur.execute("SELECT * FROM tool_definitions ORDER BY name")
+        else:
+            cur.execute(
+                "SELECT * FROM tool_definitions WHERE is_enabled = 1 ORDER BY name"
+            )
+        return [self._row_to_tool_definition(row) for row in cur.fetchall()]
+
+    def get_dynamic_tool_definitions(self, enabled_only: bool = True) -> list[ToolDefinition]:
+        """Get all dynamic (user-created) tool definitions for loading on startup."""
+        cur = self.conn.cursor()
+        if enabled_only:
+            cur.execute(
+                """
+                SELECT * FROM tool_definitions
+                WHERE is_dynamic = 1 AND is_enabled = 1
+                ORDER BY name
+            """
+            )
+        else:
+            cur.execute(
+                "SELECT * FROM tool_definitions WHERE is_dynamic = 1 ORDER BY name"
+            )
+        return [self._row_to_tool_definition(row) for row in cur.fetchall()]
+
+    def get_tools_by_category(self, category: str) -> list[ToolDefinition]:
+        """Get all tools in a category."""
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            SELECT * FROM tool_definitions
+            WHERE category = ? AND is_enabled = 1
+            ORDER BY name
+        """,
+            (category,),
+        )
+        return [self._row_to_tool_definition(row) for row in cur.fetchall()]
+
+    def record_tool_success(self, tool_name: str, duration_ms: int):
+        """
+        Record a successful tool execution.
+
+        Updates usage_count, success_count, avg_duration_ms, and last_used_at.
+        """
+        cur = self.conn.cursor()
+        now = now_iso()
+
+        # Get current stats for running average calculation
+        cur.execute(
+            "SELECT usage_count, total_duration_ms FROM tool_definitions WHERE name = ?",
+            (tool_name,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return  # Tool not tracked yet
+
+        new_total_duration = row["total_duration_ms"] + duration_ms
+        new_usage_count = row["usage_count"] + 1
+        new_avg_duration = new_total_duration / new_usage_count
+
+        cur.execute(
+            """
+            UPDATE tool_definitions SET
+                usage_count = usage_count + 1,
+                success_count = success_count + 1,
+                total_duration_ms = ?,
+                avg_duration_ms = ?,
+                last_used_at = ?,
+                updated_at = ?
+            WHERE name = ?
+        """,
+            (new_total_duration, new_avg_duration, now, now, tool_name),
+        )
+        self.conn.commit()
+
+        # Also update the legacy tools table for backward compatibility
+        cur.execute(
+            """
+            UPDATE tools SET
+                usage_count = usage_count + 1,
+                last_used_at = ?,
+                updated_at = ?
+            WHERE name = ?
+        """,
+            (now, now, tool_name),
+        )
+        self.conn.commit()
+
+    def record_tool_error(self, tool_name: str, error: str, duration_ms: int = 0):
+        """
+        Record a tool execution error.
+
+        Updates usage_count, error_count, last_error, and last_error_at.
+        Does not crash - errors in error recording are logged but suppressed.
+        """
+        try:
+            cur = self.conn.cursor()
+            now = now_iso()
+
+            # Truncate error message if too long
+            error_msg = error[:2000] if len(error) > 2000 else error
+
+            # Get current stats
+            cur.execute(
+                "SELECT usage_count, total_duration_ms FROM tool_definitions WHERE name = ?",
+                (tool_name,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return  # Tool not tracked
+
+            new_total_duration = row["total_duration_ms"] + duration_ms
+            new_usage_count = row["usage_count"] + 1
+            new_avg_duration = new_total_duration / new_usage_count if new_usage_count > 0 else 0
+
+            cur.execute(
+                """
+                UPDATE tool_definitions SET
+                    usage_count = usage_count + 1,
+                    error_count = error_count + 1,
+                    total_duration_ms = ?,
+                    avg_duration_ms = ?,
+                    last_error = ?,
+                    last_error_at = ?,
+                    last_used_at = ?,
+                    updated_at = ?
+                WHERE name = ?
+            """,
+                (new_total_duration, new_avg_duration, error_msg, now, now, now, tool_name),
+            )
+            self.conn.commit()
+
+            # Also update legacy table
+            cur.execute(
+                """
+                UPDATE tools SET
+                    usage_count = usage_count + 1,
+                    last_used_at = ?,
+                    updated_at = ?
+                WHERE name = ?
+            """,
+                (now, now, tool_name),
+            )
+            self.conn.commit()
+        except Exception:
+            pass  # Never crash on error recording
+
+    def disable_tool(self, name: str, reason: str | None = None) -> bool:
+        """
+        Disable a tool (soft delete).
+
+        The tool remains in the database for history but won't be loaded.
+        Returns True if tool was found and disabled.
+        """
+        cur = self.conn.cursor()
+        now = now_iso()
+
+        # Store reason in last_error if provided
+        if reason:
+            cur.execute(
+                """
+                UPDATE tool_definitions SET
+                    is_enabled = 0,
+                    last_error = ?,
+                    last_error_at = ?,
+                    updated_at = ?
+                WHERE name = ?
+            """,
+                (f"Disabled: {reason}", now, now, name),
+            )
+        else:
+            cur.execute(
+                """
+                UPDATE tool_definitions SET
+                    is_enabled = 0,
+                    updated_at = ?
+                WHERE name = ?
+            """,
+                (now, name),
+            )
+
+        affected = cur.rowcount
+        self.conn.commit()
+        return affected > 0
+
+    def enable_tool(self, name: str) -> bool:
+        """
+        Re-enable a disabled tool.
+
+        Returns True if tool was found and enabled.
+        """
+        cur = self.conn.cursor()
+        now = now_iso()
+        cur.execute(
+            """
+            UPDATE tool_definitions SET
+                is_enabled = 1,
+                updated_at = ?
+            WHERE name = ?
+        """,
+            (now, name),
+        )
+        affected = cur.rowcount
+        self.conn.commit()
+        return affected > 0
+
+    def delete_tool_definition(self, name: str) -> bool:
+        """
+        Permanently delete a tool definition.
+
+        Use disable_tool() for soft delete (preferred).
+        Returns True if tool was found and deleted.
+        """
+        cur = self.conn.cursor()
+        cur.execute("DELETE FROM tool_definitions WHERE name = ?", (name,))
+        affected = cur.rowcount
+        self.conn.commit()
+        return affected > 0
+
+    def get_problematic_tools(self, error_threshold: int = 5) -> list[ToolDefinition]:
+        """
+        Get tools with high error counts for review.
+
+        Returns tools with error_count >= threshold, ordered by error count.
+        """
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            SELECT * FROM tool_definitions
+            WHERE error_count >= ?
+            ORDER BY error_count DESC
+        """,
+            (error_threshold,),
+        )
+        return [self._row_to_tool_definition(row) for row in cur.fetchall()]
+
+    def get_unhealthy_tools(self) -> list[ToolDefinition]:
+        """
+        Get tools with poor success rates (< 50% success).
+
+        Only considers tools with at least 3 executions.
+        """
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            SELECT * FROM tool_definitions
+            WHERE usage_count >= 3
+            AND (success_count * 1.0 / usage_count) < 0.5
+            ORDER BY (success_count * 1.0 / usage_count) ASC
+        """
+        )
+        return [self._row_to_tool_definition(row) for row in cur.fetchall()]
+
+    def get_tool_stats(self) -> dict:
+        """
+        Get aggregate statistics about tools.
+
+        Returns dict with counts and health metrics.
+        """
+        cur = self.conn.cursor()
+
+        # Total counts
+        cur.execute("SELECT COUNT(*) FROM tool_definitions")
+        total = cur.fetchone()[0]
+
+        cur.execute("SELECT COUNT(*) FROM tool_definitions WHERE is_enabled = 1")
+        enabled = cur.fetchone()[0]
+
+        cur.execute("SELECT COUNT(*) FROM tool_definitions WHERE is_dynamic = 1")
+        dynamic = cur.fetchone()[0]
+
+        # Error stats
+        cur.execute("SELECT SUM(error_count), SUM(success_count) FROM tool_definitions")
+        row = cur.fetchone()
+        total_errors = row[0] or 0
+        total_successes = row[1] or 0
+
+        # Most used
+        cur.execute(
+            """
+            SELECT name, usage_count FROM tool_definitions
+            ORDER BY usage_count DESC LIMIT 5
+        """
+        )
+        most_used = [{"name": r["name"], "count": r["usage_count"]} for r in cur.fetchall()]
+
+        # Most errors
+        cur.execute(
+            """
+            SELECT name, error_count FROM tool_definitions
+            WHERE error_count > 0
+            ORDER BY error_count DESC LIMIT 5
+        """
+        )
+        most_errors = [{"name": r["name"], "count": r["error_count"]} for r in cur.fetchall()]
+
+        return {
+            "total_tools": total,
+            "enabled_tools": enabled,
+            "dynamic_tools": dynamic,
+            "total_executions": total_errors + total_successes,
+            "total_errors": total_errors,
+            "total_successes": total_successes,
+            "success_rate": (
+                (total_successes / (total_errors + total_successes) * 100)
+                if (total_errors + total_successes) > 0
+                else 100.0
+            ),
+            "most_used": most_used,
+            "most_errors": most_errors,
+        }
+
+    def _row_to_tool_definition(self, row: sqlite3.Row) -> ToolDefinition:
+        """Convert a database row to a ToolDefinition."""
+        return ToolDefinition(
+            id=row["id"],
+            name=row["name"],
+            description=row["description"],
+            source_code=row["source_code"],
+            parameters=deserialize_json(row["parameters"]) or {},
+            packages=deserialize_json(row["packages"]) or [],
+            env=deserialize_json(row["env"]) or [],
+            tool_var_name=row["tool_var_name"],
+            category=row["category"],
+            is_enabled=bool(row["is_enabled"]),
+            is_dynamic=bool(row["is_dynamic"]),
+            usage_count=row["usage_count"],
+            success_count=row["success_count"],
+            error_count=row["error_count"],
+            last_used_at=parse_datetime(row["last_used_at"]),
+            last_error=row["last_error"],
+            last_error_at=parse_datetime(row["last_error_at"]),
+            avg_duration_ms=row["avg_duration_ms"] or 0.0,
+            total_duration_ms=row["total_duration_ms"] or 0.0,
+            entity_id=row["entity_id"],
+            summary_node_id=row["summary_node_id"],
+            version=row["version"],
+            created_by_event_id=row["created_by_event_id"],
             created_at=parse_datetime(row["created_at"]),
             updated_at=parse_datetime(row["updated_at"]),
         )

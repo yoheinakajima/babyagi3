@@ -195,9 +195,16 @@ class Agent(EventEmitter):
         # Register core tools
         self._register_core_tools()
 
-        # Load external tools
+        # Load persisted dynamic tools from database (self-improvement)
+        self._load_persisted_tools()
+
+        # Load external tools from /tools directory
         if load_tools:
             self._load_external_tools()
+
+        # Tool context builder for intelligent tool selection
+        self._tool_context_builder = self._initialize_tool_context()
+        self._current_tool_selection = None  # Cached selection for current turn
 
     def register_sender(self, channel: str, sender):
         """Register a channel sender for outbound messages.
@@ -208,17 +215,47 @@ class Agent(EventEmitter):
         """
         self.senders[channel] = sender
 
-    def register(self, tool: Tool | ToolLike):
+    def register(
+        self,
+        tool: Tool | ToolLike,
+        emit_event: bool = False,
+        source_code: str | None = None,
+        tool_var_name: str | None = None,
+        category: str = "custom",
+        is_dynamic: bool = True,
+    ):
         """Register a tool with validation.
 
         Accepts Tool instances or any object matching ToolLike protocol.
         Duck-typed objects are automatically converted to Tool instances.
+
+        Args:
+            tool: The tool to register.
+            emit_event: If True, emit a tool_registered event for persistence.
+            source_code: Source code for dynamic tools (enables persistence).
+            tool_var_name: Variable name in source code.
+            category: Tool category for organization.
+            is_dynamic: Whether this is a dynamically created tool.
 
         Raises:
             ToolValidationError: If tool is malformed or missing required attributes.
         """
         validated = self._validate_and_convert(tool)
         self.tools[validated.name] = validated
+
+        # Emit event for persistence (hooks will handle DB storage)
+        if emit_event:
+            self.emit("tool_registered", {
+                "name": validated.name,
+                "description": validated.schema.get("description", ""),
+                "parameters": validated.schema.get("input_schema", {}),
+                "source_code": source_code,
+                "packages": getattr(validated, "packages", []),
+                "env": getattr(validated, "env", []),
+                "tool_var_name": tool_var_name,
+                "category": category,
+                "is_dynamic": is_dynamic,
+            })
 
     def _validate_and_convert(self, obj) -> Tool:
         """Validate and convert an object to a proper Tool instance.
@@ -340,14 +377,149 @@ class Agent(EventEmitter):
         self.register(_register_tool_tool(self))
         self.register(_send_message_tool(self))
 
+    def _load_persisted_tools(self):
+        """Load dynamically-created tools from the database on startup.
+
+        This enables self-improvement: tools the agent creates persist
+        across restarts and are automatically reloaded.
+
+        Tools that fail to load are disabled rather than crashing.
+        """
+        if self.memory is None:
+            return
+
+        try:
+            tool_defs = self.memory.store.get_dynamic_tool_definitions(enabled_only=True)
+            if not tool_defs:
+                return
+
+            loaded = 0
+            failed = 0
+
+            for tool_def in tool_defs:
+                try:
+                    tool = self._reconstruct_tool(tool_def)
+                    if tool:
+                        # Register without emitting event (already persisted)
+                        self.tools[tool.name] = tool
+                        loaded += 1
+                except Exception as e:
+                    # Disable broken tool rather than crash
+                    failed += 1
+                    try:
+                        self.memory.store.disable_tool(
+                            tool_def.name,
+                            reason=f"Failed to load on startup: {str(e)[:200]}"
+                        )
+                    except Exception:
+                        pass  # Best effort disable
+
+            if loaded > 0 or failed > 0:
+                if failed == 0:
+                    console.success(f"Tools: loaded {loaded} persisted tool(s)")
+                else:
+                    console.warning(
+                        f"Tools: loaded {loaded}, disabled {failed} broken tool(s)"
+                    )
+
+        except Exception as e:
+            # Don't crash startup if tool loading fails
+            console.warning(f"Could not load persisted tools: {e}")
+
+    def _reconstruct_tool(self, tool_def) -> Tool | None:
+        """
+        Reconstruct a Tool from its persisted ToolDefinition.
+
+        For tools with external packages, creates a sandboxed executor.
+        For local tools, executes source code to get the function.
+
+        Returns:
+            Tool instance if successful, None if reconstruction fails.
+        """
+        # No source code - can't reconstruct
+        if not tool_def.source_code:
+            return None
+
+        # Has external packages - needs sandbox execution
+        if tool_def.packages:
+            return self._create_sandboxed_tool_from_definition(tool_def)
+
+        # Local tool - execute source to get function
+        try:
+            # Set up namespace with required imports
+            namespace = {
+                "Tool": Tool,
+                "datetime": datetime,
+                "json": json,
+            }
+
+            # Execute the source code
+            exec(tool_def.source_code, namespace)
+
+            # Get the tool variable
+            if tool_def.tool_var_name and tool_def.tool_var_name in namespace:
+                return namespace[tool_def.tool_var_name]
+
+            # Try to find a Tool instance in namespace
+            for name, value in namespace.items():
+                if isinstance(value, Tool):
+                    return value
+
+            return None
+
+        except Exception as e:
+            raise RuntimeError(f"Failed to reconstruct tool '{tool_def.name}': {e}")
+
+    def _create_sandboxed_tool_from_definition(self, tool_def) -> Tool:
+        """
+        Create a sandboxed tool from a ToolDefinition.
+
+        Uses e2b sandbox for tools with external package dependencies.
+        """
+        def sandboxed_fn(params: dict, agent) -> dict:
+            try:
+                from tools.sandbox import run_in_sandbox
+
+                # Build the execution code
+                exec_code = f'''
+{tool_def.source_code}
+
+# Execute the tool function
+import json
+params = json.loads("""{json.dumps(params)}""")
+if "{tool_def.tool_var_name}" in dir():
+    tool = {tool_def.tool_var_name}
+    result = tool.fn(params, None)
+else:
+    result = {{"error": "Tool variable not found"}}
+print("RESULT:", json.dumps(result))
+'''
+                result = run_in_sandbox(
+                    exec_code,
+                    packages=tool_def.packages,
+                    timeout=120
+                )
+                return result
+            except Exception as e:
+                return {"error": f"Sandbox execution failed: {str(e)}"}
+
+        return Tool(
+            name=tool_def.name,
+            description=tool_def.description,
+            parameters=tool_def.parameters,
+            fn=sandboxed_fn,
+            packages=tool_def.packages,
+            env=tool_def.env,
+        )
+
     async def _execute_scheduled_task(self, task: ScheduledTask) -> str:
         """Execute a scheduled task - runs as the agent with its own thread."""
         import logging
         import traceback
         logger = logging.getLogger(__name__)
-        
+
         logger.info(f"[Scheduler] Starting task execution: {task.name} (id={task.id})")
-        
+
         # Emit task_start event
         self.emit("task_start", {
             "id": task.id,
@@ -403,6 +575,62 @@ Work autonomously. Use tools as needed. When done, provide a brief summary of wh
                 self.register(tool)
         except ImportError:
             pass
+
+    def _initialize_tool_context(self):
+        """Initialize the tool context builder for intelligent tool selection.
+
+        The builder selects a subset of relevant tools for each API call instead
+        of sending all tools. This manages context window usage as the agent
+        creates more tools over time.
+
+        Returns:
+            ToolContextBuilder if memory is available, None otherwise.
+        """
+        if self.memory is None:
+            return None
+
+        try:
+            from memory.tool_context import create_tool_context_builder
+            return create_tool_context_builder(self.memory.store)
+        except ImportError:
+            return None
+        except Exception:
+            # Graceful degradation - continue without smart tool selection
+            return None
+
+    def _refresh_tool_selection(self, current_query: str = None, context: dict = None):
+        """Refresh the tool selection for the current turn.
+
+        Called before making API calls to select which tools to include.
+        Caches the selection in _current_tool_selection for use by
+        _tool_schemas() and _system_prompt().
+
+        Args:
+            current_query: The current user query for relevance matching.
+            context: Channel context with metadata.
+        """
+        if self._tool_context_builder is None:
+            self._current_tool_selection = None
+            return
+
+        # Extract topics from agent state if available
+        current_topics = None
+        if self.memory and hasattr(self.memory, 'store'):
+            try:
+                agent_state = self.memory.store.get_agent_state()
+                if agent_state:
+                    current_topics = agent_state.current_topics
+            except Exception:
+                pass
+
+        current_channel = context.get("channel") if context else None
+
+        self._current_tool_selection = self._tool_context_builder.select_tools(
+            all_tools=self.tools,
+            current_query=current_query,
+            current_topics=current_topics,
+            current_channel=current_channel,
+        )
 
     # -------------------------------------------------------------------------
     # Message Processing
@@ -475,6 +703,10 @@ Work autonomously. Use tools as needed. When done, provide a brief summary of wh
 
             thread = self.threads.setdefault(thread_id, [])
             thread.append({"role": "user", "content": user_input})
+
+            # Refresh tool selection for this turn
+            # This selects relevant tools based on query, context, and usage patterns
+            self._refresh_tool_selection(user_input, context)
 
             # Generate context-aware system prompt
             is_owner = context.get("is_owner", True)
@@ -619,6 +851,12 @@ Work autonomously. Use tools as needed. When done, provide a final summary."""
     def _build_base_prompt(self) -> str:
         """Build the base capabilities prompt."""
         status = self._build_status_summaries()
+
+        # Add tool inventory summary if available (for intelligent tool selection)
+        tool_inventory = ""
+        if self._current_tool_selection is not None:
+            tool_inventory = f"\n\n{self._current_tool_selection.tool_inventory_summary}"
+
         return f"""You are a helpful assistant with access to powerful tools.
 
 CAPABILITIES:
@@ -640,7 +878,7 @@ CAPABILITIES:
 6. **Multi-Channel Communication**: Send messages via email, SMS, etc.
 
 7. **Register New Tools**: Extend capabilities at runtime with Python code.
-{status}
+{status}{tool_inventory}
 
 WHEN TO USE SCHEDULING:
 
@@ -697,6 +935,26 @@ You are responding to a message from {sender}, who is NOT your owner.
 - Use send_message to contact your owner if needed"""
 
     def _tool_schemas(self) -> list:
+        """Get tool schemas for API calls.
+
+        Uses intelligent selection when ToolContextBuilder is available,
+        otherwise returns all tools. The selection prioritizes:
+        1. Core tools (memory, objective, notes, schedule, etc.)
+        2. Most frequently used tools
+        3. Recently used tools
+        4. Tools relevant to current context
+
+        Returns:
+            List of tool schema dicts for the API call.
+        """
+        # Use smart selection if available
+        if self._current_tool_selection is not None:
+            return [
+                t.schema
+                for name, t in self.tools.items()
+                if name in self._current_tool_selection.selected_tools
+            ]
+        # Fallback: all tools
         return [t.schema for t in self.tools.values()]
 
     def _extract_text(self, response) -> str:
@@ -1153,14 +1411,24 @@ json.dumps(_result)
                 name=tool_def["name"],
                 description=tool_def["description"],
                 parameters=tool_def["parameters"],
-                fn=sandboxed_executor(code, packages)
+                fn=sandboxed_executor(code, packages),
+                packages=packages,
             )
-            ag.register(new_tool)
+            # Register with persistence enabled
+            ag.register(
+                new_tool,
+                emit_event=True,
+                source_code=code,
+                tool_var_name=tool_var_name,
+                category="custom",
+                is_dynamic=True,
+            )
             return {
                 "registered": new_tool.name,
                 "description": new_tool.schema["description"],
                 "sandboxed": True,
-                "packages": packages
+                "packages": packages,
+                "persisted": True
             }
 
         # No external dependencies - run locally (fast path)
@@ -1173,11 +1441,20 @@ json.dumps(_result)
         try:
             exec(code, namespace)
             new_tool = namespace[tool_var_name]
-            ag.register(new_tool)  # Will raise ToolValidationError if malformed
+            # Register with persistence enabled
+            ag.register(
+                new_tool,
+                emit_event=True,
+                source_code=code,
+                tool_var_name=tool_var_name,
+                category="custom",
+                is_dynamic=True,
+            )
             return {
                 "registered": new_tool.name,
                 "description": new_tool.schema["description"],
-                "sandboxed": False
+                "sandboxed": False,
+                "persisted": True
             }
         except ToolValidationError as e:
             # Provide clear guidance on how to fix
@@ -1197,6 +1474,9 @@ json.dumps(_result)
         name="register_tool",
         description="""Register a new tool by providing Python code.
 
+Tools you create are PERSISTED and will be available after restart. This enables
+self-improvement: build tools for yourself that persist across sessions.
+
 IMPORTANT: You MUST use the provided Tool class to define your tool:
 
     def my_fn(params: dict, agent) -> dict:
@@ -1214,7 +1494,10 @@ IMPORTANT: You MUST use the provided Tool class to define your tool:
     )
 
 The Tool class is pre-loaded in the namespace. External packages (requests, pandas, etc.)
-are auto-detected and installed in a sandbox.""",
+are auto-detected and installed in a sandbox.
+
+Tool execution is automatically tracked: success/error counts, duration, and usage statistics
+are recorded for monitoring and debugging.""",
         parameters={
             "type": "object",
             "properties": {

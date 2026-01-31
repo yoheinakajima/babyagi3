@@ -21,37 +21,166 @@ def setup_memory_hooks(agent, memory):
         agent = Agent()
         memory = Memory()
         setup_memory_hooks(agent, memory)
+
+    Enhanced hooks include:
+    - Tool execution tracking with success/error statistics
+    - Tool registration events for persistence
+    - Automatic tool entity creation in the knowledge graph
     """
 
     @agent.on("tool_start")
     def on_tool_start(event):
         """Log tool calls to memory."""
-        # Create event for tool call
         context = getattr(agent, "_current_context", {})
+        tool_name = event["name"]
+
+        # Log the event
         memory.log_event(
-            content=f"Tool call: {event['name']}\nInput: {event['input']}",
+            content=f"Tool call: {tool_name}\nInput: {event['input']}",
             event_type="tool_call",
             channel=context.get("channel"),
             direction="internal",
-            tool_id=event["name"],
+            tool_id=tool_name,
             person_id=context.get("person_id"),
             is_owner=context.get("is_owner", True),
         )
 
     @agent.on("tool_end")
     def on_tool_end(event):
-        """Log tool results to memory."""
+        """Log tool results to memory and track statistics."""
         context = getattr(agent, "_current_context", {})
-        result_str = str(event.get("result", ""))[:1000]  # Truncate large results
-        memory.log_event(
-            content=f"Tool result: {event['name']}\nResult: {result_str}",
-            event_type="tool_result",
-            channel=context.get("channel"),
-            direction="internal",
-            tool_id=event["name"],
-            person_id=context.get("person_id"),
-            is_owner=context.get("is_owner", True),
-        )
+        tool_name = event["name"]
+        result = event.get("result", "")
+        duration_ms = event.get("duration_ms", 0)
+
+        # Check if result indicates an error
+        is_error = False
+        error_msg = None
+
+        if isinstance(result, dict):
+            if "error" in result:
+                is_error = True
+                error_msg = str(result["error"])
+            elif result.get("status") == "error":
+                is_error = True
+                error_msg = result.get("message", "Unknown error")
+
+        if is_error:
+            # Log error event
+            memory.log_event(
+                content=f"Tool error: {tool_name}\nError: {error_msg}",
+                event_type="tool_error",
+                channel=context.get("channel"),
+                direction="internal",
+                tool_id=tool_name,
+                person_id=context.get("person_id"),
+                is_owner=context.get("is_owner", True),
+                metadata={"error": error_msg, "duration_ms": duration_ms},
+            )
+            # Update error statistics (safe - won't crash)
+            try:
+                memory.store.record_tool_error(tool_name, error_msg, duration_ms)
+            except Exception:
+                pass  # Never crash on stats update
+        else:
+            # Log success event
+            result_str = str(result)[:1000]  # Truncate large results
+            memory.log_event(
+                content=f"Tool result: {tool_name}\nResult: {result_str}",
+                event_type="tool_result",
+                channel=context.get("channel"),
+                direction="internal",
+                tool_id=tool_name,
+                person_id=context.get("person_id"),
+                is_owner=context.get("is_owner", True),
+                metadata={"duration_ms": duration_ms},
+            )
+            # Update success statistics (safe - won't crash)
+            try:
+                memory.store.record_tool_success(tool_name, duration_ms)
+            except Exception:
+                pass  # Never crash on stats update
+
+    @agent.on("tool_registered")
+    def on_tool_registered(event):
+        """
+        Handle tool registration - persist to database and create graph entity.
+
+        This enables tool persistence across restarts (self-improvement).
+        """
+        try:
+            tool_name = event["name"]
+            description = event.get("description", "")
+            parameters = event.get("parameters", {})
+            source_code = event.get("source_code")
+            packages = event.get("packages", [])
+            env = event.get("env", [])
+            tool_var_name = event.get("tool_var_name")
+            category = event.get("category", "custom")
+            is_dynamic = event.get("is_dynamic", True)
+
+            # Save tool definition to database
+            tool_def = memory.store.save_tool_definition(
+                name=tool_name,
+                description=description,
+                parameters=parameters,
+                source_code=source_code,
+                packages=packages,
+                env=env,
+                tool_var_name=tool_var_name,
+                category=category,
+                is_dynamic=is_dynamic,
+            )
+
+            # Log the creation event
+            memory.log_event(
+                content=f"Tool created: {tool_name}\nDescription: {description}\nCategory: {category}",
+                event_type="tool_created",
+                channel=None,
+                direction="internal",
+                tool_id=tool_name,
+                is_owner=True,
+                metadata={
+                    "tool_id": tool_def.id,
+                    "version": tool_def.version,
+                    "is_dynamic": is_dynamic,
+                    "packages": packages,
+                },
+            )
+        except Exception as e:
+            # Log but don't crash - tool registration should still work
+            # even if persistence fails
+            try:
+                memory.log_event(
+                    content=f"Tool registration warning: {event.get('name', 'unknown')}\nError: {str(e)}",
+                    event_type="tool_error",
+                    channel=None,
+                    direction="internal",
+                    tool_id=event.get("name"),
+                    is_owner=True,
+                    metadata={"error": str(e), "phase": "registration"},
+                )
+            except Exception:
+                pass  # Absolute last resort - never crash
+
+    @agent.on("tool_disabled")
+    def on_tool_disabled(event):
+        """Handle tool disabling."""
+        try:
+            tool_name = event["name"]
+            reason = event.get("reason", "No reason provided")
+
+            memory.log_event(
+                content=f"Tool disabled: {tool_name}\nReason: {reason}",
+                event_type="tool_disabled",
+                channel=None,
+                direction="internal",
+                tool_id=tool_name,
+                is_owner=True,
+                metadata={"reason": reason},
+            )
+        except Exception:
+            pass  # Never crash
 
     @agent.on("objective_start")
     def on_objective_start(event):
@@ -250,13 +379,102 @@ def create_enhanced_memory_tool(memory):
             except RuntimeError:
                 return asyncio.run(do_search())
 
+        elif action == "list_tools":
+            # List all tools I've created
+            try:
+                tools = memory.store.get_all_tool_definitions(include_disabled=True)
+                return {
+                    "tools": [
+                        {
+                            "name": t.name,
+                            "description": t.description[:100],
+                            "category": t.category,
+                            "is_enabled": t.is_enabled,
+                            "is_dynamic": t.is_dynamic,
+                            "usage_count": t.usage_count,
+                            "success_rate": f"{t.success_rate:.1f}%",
+                            "is_healthy": t.is_healthy,
+                            "version": t.version,
+                        }
+                        for t in tools
+                    ]
+                }
+            except Exception as e:
+                return {"error": f"Could not list tools: {e}"}
+
+        elif action == "tool_stats":
+            # Get aggregate tool statistics
+            try:
+                stats = memory.store.get_tool_stats()
+                return {"stats": stats}
+            except Exception as e:
+                return {"error": f"Could not get tool stats: {e}"}
+
+        elif action == "problematic_tools":
+            # Get tools with high error rates
+            try:
+                threshold = params.get("threshold", 5)
+                problematic = memory.store.get_problematic_tools(error_threshold=threshold)
+                unhealthy = memory.store.get_unhealthy_tools()
+                return {
+                    "high_error_count": [
+                        {
+                            "name": t.name,
+                            "error_count": t.error_count,
+                            "last_error": t.last_error,
+                            "success_rate": f"{t.success_rate:.1f}%",
+                        }
+                        for t in problematic
+                    ],
+                    "low_success_rate": [
+                        {
+                            "name": t.name,
+                            "usage_count": t.usage_count,
+                            "success_rate": f"{t.success_rate:.1f}%",
+                        }
+                        for t in unhealthy
+                    ],
+                }
+            except Exception as e:
+                return {"error": f"Could not get problematic tools: {e}"}
+
+        elif action == "get_tool":
+            # Get details about a specific tool
+            tool_name = params.get("tool_name")
+            if not tool_name:
+                return {"error": "tool_name required"}
+            try:
+                tool_def = memory.store.get_tool_definition(tool_name)
+                if tool_def is None:
+                    return {"error": f"Tool not found: {tool_name}"}
+                return {
+                    "tool": {
+                        "name": tool_def.name,
+                        "description": tool_def.description,
+                        "category": tool_def.category,
+                        "is_enabled": tool_def.is_enabled,
+                        "is_dynamic": tool_def.is_dynamic,
+                        "packages": tool_def.packages,
+                        "usage_count": tool_def.usage_count,
+                        "success_count": tool_def.success_count,
+                        "error_count": tool_def.error_count,
+                        "success_rate": f"{tool_def.success_rate:.1f}%",
+                        "avg_duration_ms": tool_def.avg_duration_ms,
+                        "last_error": tool_def.last_error,
+                        "version": tool_def.version,
+                        "created_at": tool_def.created_at.isoformat() if tool_def.created_at else None,
+                    }
+                }
+            except Exception as e:
+                return {"error": f"Could not get tool: {e}"}
+
         return {"error": f"Unknown action: {action}"}
 
     return Tool(
         name="memory",
-        description="""Enhanced memory system with semantic search and graph storage.
+        description="""Enhanced memory system with semantic search, graph storage, and tool management.
 
-Actions:
+Memory Actions:
 - store: Store a fact or observation (content)
 - search: Semantic search over memories (query)
 - list: List recent memories
@@ -266,25 +484,34 @@ Actions:
 - get_context: Get current assembled context
 - deep_search: Thorough agentic search for complex queries (query)
 
+Tool Management Actions (self-improvement):
+- list_tools: List all tools I've created with their status and health
+- tool_stats: Get aggregate statistics about tool usage and success rates
+- problematic_tools: Find tools with high error rates (optional threshold)
+- get_tool: Get detailed info about a specific tool (tool_name)
+
 Examples:
 - memory(action="store", content="John works at Acme Corp")
 - memory(action="search", query="fundraising discussions")
 - memory(action="find_entity", query="venture capital", type="person")
-- memory(action="find_relationship", query="investment")
-- memory(action="get_summary", key="root")
-- memory(action="deep_search", query="How has my relationship with Sarah changed?")""",
+- memory(action="list_tools")
+- memory(action="tool_stats")
+- memory(action="get_tool", tool_name="my_custom_tool")
+- memory(action="problematic_tools", threshold=3)""",
         parameters={
             "type": "object",
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["store", "search", "list", "find_entity", "find_relationship", "get_summary", "get_context", "deep_search"],
+                    "enum": ["store", "search", "list", "find_entity", "find_relationship", "get_summary", "get_context", "deep_search", "list_tools", "tool_stats", "problematic_tools", "get_tool"],
                 },
                 "content": {"type": "string", "description": "Content to store"},
                 "query": {"type": "string", "description": "Search query"},
                 "key": {"type": "string", "description": "Summary node key"},
                 "type": {"type": "string", "description": "Entity type filter"},
                 "entity_id": {"type": "string", "description": "Entity ID for relationship search"},
+                "tool_name": {"type": "string", "description": "Tool name for get_tool action"},
+                "threshold": {"type": "integer", "description": "Error threshold for problematic_tools"},
             },
             "required": ["action"],
         },
