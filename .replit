@@ -18,10 +18,6 @@ author = "agent"
 task = "workflow.run"
 args = "Unified Message Agent"
 
-[[workflows.workflow.tasks]]
-task = "workflow.run"
-args = "Docs Viewer"
-
 [[workflows.workflow]]
 name = "Unified Message Agent"
 author = "agent"
@@ -32,18 +28,6 @@ outputType = "console"
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "python main.py"
-
-[[workflows.workflow]]
-name = "Docs Viewer"
-author = "agent"
-
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "python -m http.server 5000 --directory docs"
-waitForPort = 5000
-
-[workflows.workflow.metadata]
-outputType = "webview"
 
 [[ports]]
 localPort = 5000
