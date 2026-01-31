@@ -35,6 +35,8 @@ This means the entire system reduces to: **a loop that processes messages and de
 - **e2b Sandbox** — Safe code execution for dynamically created tools
 - **External Tools** — Web search, browser automation, email, secrets management
 - **API Server** — FastAPI server mode with full REST API
+- **Tool Persistence** — Dynamically created tools survive restarts with health tracking
+- **Credential Storage** — Secure storage for accounts and payment methods with keyring integration
 
 ## Architecture
 
@@ -157,6 +159,50 @@ ScheduledTask {
   next_run_at: string
   last_run_at: string
   run_count: int
+}
+
+ToolDefinition {
+  id: string
+  name: string
+  description: string
+  source_code: string | None     # Python code for dynamic tools
+  parameters: json_schema
+  packages: list[str]            # Required packages
+  env: list[str]                 # Required env vars
+  category: string               # "core", "builtin", "custom"
+  is_enabled: bool
+  is_dynamic: bool               # False for built-in tools
+
+  # Execution tracking
+  usage_count: int
+  success_count: int
+  error_count: int
+  avg_duration_ms: float
+  last_used_at: datetime | None
+  last_error: string | None
+}
+
+Credential {
+  id: string
+  credential_type: string        # "account", "credit_card", "api_key"
+  service: string                # "github.com", "stripe.com"
+
+  # Account fields
+  username: string | None
+  email: string | None
+  password_ref: string | None    # Reference to keyring
+
+  # Credit card fields
+  card_last_four: string | None
+  card_type: string | None       # "visa", "mastercard", etc.
+  card_expiry: string | None
+  card_ref: string | None        # Reference to keyring
+  billing_name: string | None
+  billing_address: string | None
+
+  # Metadata
+  notes: string | None
+  last_used_at: datetime | None
 }
 ```
 
@@ -468,6 +514,64 @@ agent.run("Convert 100 Celsius to Fahrenheit")
 
 Tools that require external packages are automatically detected and sandboxed for safety.
 
+#### Tool Persistence
+
+Dynamically created tools are **automatically persisted** to the SQLite database and survive agent restarts:
+
+- **Storage**: Tools are saved in the `tool_definitions` table with full source code
+- **Auto-reload**: On startup, all persisted tools are automatically re-registered
+- **Smart execution**: Pure Python tools run locally (fast), tools with external packages use e2b sandbox (safe)
+
+```python
+# Create a tool - it's persisted automatically
+agent.run("Create a calculator tool that adds two numbers")
+
+# Restart the agent...
+agent = Agent()
+
+# Tool is still available!
+agent.run("Add 5 and 3")  # Works immediately
+```
+
+#### Tool Health Tracking
+
+Every tool execution is tracked with detailed metrics:
+
+```python
+ToolDefinition {
+    name: str                    # Tool name
+    description: str             # What it does
+    source_code: str             # Python code (for dynamic tools)
+    parameters: dict             # JSON schema
+
+    # Execution statistics
+    usage_count: int             # Total executions
+    success_count: int           # Successful runs
+    error_count: int             # Failed runs
+    avg_duration_ms: float       # Average execution time
+    last_used_at: datetime       # Last execution timestamp
+    last_error: str              # Most recent error message
+
+    # Health indicators
+    success_rate: float          # Computed: success_count / usage_count
+    is_healthy: bool             # True if error rate < 50%
+}
+```
+
+**Monitoring tool health:**
+
+```python
+# The agent can check tool health
+agent.run("Which of my tools have been failing?")
+agent.run("Show me usage statistics for my tools")
+
+# Programmatic access
+from memory import MemoryStore
+store = MemoryStore()
+unhealthy = store.get_unhealthy_tools()  # Tools with high error rates
+problematic = store.get_problematic_tools()  # Tools needing attention
+```
+
 ### Send Message Tool
 
 Send messages across any configured channel:
@@ -523,7 +627,11 @@ agent.run("Sign up for service X and wait for the verification email")
 
 ### Secrets Management
 
-Securely store and retrieve API keys using system keyring.
+BabyAGI provides a **two-layer security model** for storing sensitive data:
+
+#### Layer 1: API Keys and Secrets
+
+Securely store and retrieve API keys using system keyring with automatic fallback to encrypted file storage.
 
 ```python
 # Store a secret
@@ -535,6 +643,82 @@ agent.run("What API keys do I have stored?")
 # Secrets are automatically retrieved when needed
 agent.run("Use my GitHub token to check my repositories")
 ```
+
+**Storage backends (checked in order):**
+1. **Environment variables** — checked first for immediate access
+2. **System keyring** — OS-level encryption (macOS Keychain, Windows Credential Locker, Linux Secret Service)
+3. **Encrypted file fallback** — uses `keyrings.cryptfile` if system keyring unavailable
+
+**Security features:**
+- Values are always masked in output (e.g., `sk-x...2024`)
+- Batch validation with `check_required_secrets()`
+- Interactive prompts via `request_api_key()` when keys are missing
+
+#### Layer 2: Credential Storage (Accounts & Payment Methods)
+
+Store complete account credentials and payment methods with a split storage architecture:
+
+- **Metadata** (in SQLite) — service names, usernames, emails, card last-4, billing info
+- **Sensitive data** (in Keyring only) — passwords, full card numbers, CVVs
+
+```python
+# Store an account
+agent.run("Store my login for github.com: username is 'myuser', password is 'secret123'")
+
+# Store a credit card
+agent.run("Store my Visa card ending in 4242 for online purchases")
+
+# List all credentials (sensitive data masked)
+agent.run("What accounts do I have stored?")
+
+# Search credentials
+agent.run("Find my credentials for anything related to AWS")
+
+# Retrieve with secrets (explicit request required)
+agent.run("Get my github.com password - I need to log in")
+```
+
+**Credential types supported:**
+
+| Type | Metadata Stored | Secrets in Keyring |
+|------|-----------------|-------------------|
+| `account` | service, username, email | password |
+| `credit_card` | last 4 digits, card type, expiry, billing address | full card number, CVV |
+| `api_key` | service name, description | API key value |
+
+**Credential model:**
+
+```python
+Credential {
+    id: str
+    credential_type: str           # "account", "credit_card", "api_key"
+    service: str                   # "github.com", "stripe.com", etc.
+
+    # Account fields
+    username: str | None
+    email: str | None
+    password_ref: str | None       # Reference to keyring entry
+
+    # Credit card fields
+    card_last_four: str | None     # Only last 4 stored in DB
+    card_type: str | None          # Auto-detected: visa, mastercard, amex, discover
+    card_expiry: str | None        # "MM/YY"
+    card_ref: str | None           # Reference to full card in keyring
+    billing_name: str | None
+    billing_address: str | None
+
+    # Metadata
+    notes: str | None
+    last_used_at: datetime | None
+}
+```
+
+**Security guarantees:**
+- Passwords are **never** stored in the database
+- Card numbers only stored as last 4 digits in DB — full number in keyring
+- All sensitive data encrypted at rest via OS keyring
+- Explicit `include_secrets=True` flag required to retrieve sensitive data
+- Card types auto-detected from number patterns (Visa, MasterCard, Amex, Discover, UnionPay)
 
 ## Configuration
 
@@ -924,7 +1108,8 @@ summary = get_health_summary()
 | **Extensible by design** | New capabilities = new tools |
 | **Safe extensibility** | Dynamic tools run in sandboxed environment |
 | **Graceful degradation** | Missing packages/APIs degrade functionality but don't crash |
-| **Persistence** | Scheduled tasks survive restarts |
+| **Persistence** | Scheduled tasks and dynamic tools survive restarts |
+| **Secure by default** | Credentials split between DB metadata and keyring secrets |
 
 ### The Entire System
 
@@ -965,7 +1150,8 @@ tools/
 ├── sandbox.py (e2b code execution)
 ├── web.py (search, browse, fetch)
 ├── email.py (AgentMail tools)
-└── secrets.py (secure key storage)
+├── secrets.py (API key storage)
+└── credentials.py (account & payment storage)
 
 config.py (YAML loader with env substitution)
 config.yaml (channel configuration)
