@@ -24,6 +24,7 @@ dependencies = [
     "croniter>=2.0.0",
     # Configuration
     "pyyaml>=6.0",
+    "composio-core>=0.7.21",
 ]
 
 [project.scripts]
