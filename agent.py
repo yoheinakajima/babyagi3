@@ -510,6 +510,25 @@ Work autonomously. Use tools as needed. When done, provide a brief summary of wh
             self._thread_locks[thread_id] = asyncio.Lock()
         return self._thread_locks[thread_id]
 
+    def _spawn_background_task(self, coro) -> bool:
+        """Schedule an async coroutine as a background task from any thread.
+
+        This method safely schedules a coroutine on the main event loop,
+        even when called from a thread pool worker (e.g., during tool execution).
+
+        Args:
+            coro: The coroutine to run as a background task
+
+        Returns:
+            True if the task was scheduled, False if no event loop is available.
+            The task runs asynchronously; errors should be handled by the coroutine.
+        """
+        if self._main_loop is None:
+            return False
+
+        asyncio.run_coroutine_threadsafe(coro, self._main_loop)
+        return True
+
     async def run_async(self, user_input: str, thread_id: str = "main", context: dict = None) -> str:
         """Process user input and return response. Objectives run in background.
 
@@ -833,8 +852,10 @@ def _objective_tool(agent: Agent) -> Tool:
                 schedule=params.get("schedule")
             )
             ag.objectives[obj_id] = obj
-            # Start in background
-            asyncio.create_task(ag.run_objective(obj_id))
+            # Start in background on main event loop (safe from thread pool)
+            if not ag._spawn_background_task(ag.run_objective(obj_id)):
+                del ag.objectives[obj_id]
+                return {"error": "Agent not initialized (no event loop)"}
             return {
                 "spawned": obj_id,
                 "goal": obj.goal,
@@ -1003,9 +1024,9 @@ def _schedule_tool(agent: Agent) -> Tool:
             if not task:
                 return {"error": f"Task {task_id} not found"}
 
-            # Spawn task execution in background (don't block waiting for result)
-            # This avoids creating new event loops which can cause deadlocks
-            asyncio.create_task(ag.scheduler.run_now(task_id, force=True))
+            # Spawn task execution in background on main event loop (safe from thread pool)
+            if not ag._spawn_background_task(ag.scheduler.run_now(task_id, force=True)):
+                return {"error": "Agent not initialized (no event loop)"}
             return {
                 "status": "triggered",
                 "task_id": task_id,
