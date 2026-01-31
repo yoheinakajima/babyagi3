@@ -297,7 +297,7 @@ def get_all_tools(tool_class):
         tool_class: The Tool class from agent.py
     """
     # Import all tool modules to trigger registration
-    from tools import web, email, secrets, verbose
+    from tools import web, email, secrets, verbose, credentials
 
     tools = []
     for info in _registered_tools:
@@ -322,7 +322,7 @@ def get_registered_tool_info() -> list[dict]:
     """
     # Ensure tools are imported
     try:
-        from tools import web, email, secrets, verbose
+        from tools import web, email, secrets, verbose, credentials
     except ImportError:
         pass
 
@@ -391,7 +391,7 @@ def check_tool_health(include_core: bool = True) -> dict:
 
     # Add core tools (always available, no external deps)
     if include_core:
-        core_tools = ["memory", "objective", "notes", "register_tool"]
+        core_tools = ["memory", "objective", "notes", "register_tool", "store_credential", "get_credential", "list_credentials"]
         health["ready"] = core_tools + health["ready"]
 
         # Check E2B for sandbox capability

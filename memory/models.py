@@ -377,6 +377,62 @@ class ToolDefinition:
 
 
 # ═══════════════════════════════════════════════════════════
+# CREDENTIALS (secure storage for accounts and payment methods)
+# ═══════════════════════════════════════════════════════════
+
+
+@dataclass
+class Credential:
+    """A securely stored credential - user account or payment method.
+
+    Credentials are stored in the database with sensitive data (passwords,
+    card numbers) stored only as references to the keyring/secrets system.
+
+    This enables:
+    - Persistent storage of what accounts exist
+    - Quick lookup by service name
+    - Secure storage of actual secrets via keyring
+    """
+
+    id: str
+    credential_type: str  # "account", "credit_card", "api_key"
+    service: str  # "yohei.ai", "stripe.com", etc.
+
+    # For user accounts
+    username: str | None = None
+    email: str | None = None
+    password_ref: str | None = None  # Reference to secret in keyring
+
+    # For credit cards
+    card_last_four: str | None = None
+    card_type: str | None = None  # "visa", "mastercard", etc.
+    card_expiry: str | None = None  # "MM/YY"
+    card_ref: str | None = None  # Reference to full card in keyring
+    billing_name: str | None = None
+    billing_address: str | None = None
+
+    # Common fields
+    notes: str | None = None
+    metadata: dict | None = None
+
+    # Timestamps
+    created_at: datetime = field(default_factory=datetime.now)
+    updated_at: datetime = field(default_factory=datetime.now)
+    last_used_at: datetime | None = None
+
+    def __repr__(self) -> str:
+        if self.credential_type == "credit_card":
+            return (
+                f"Credential(type='credit_card', service='{self.service}', "
+                f"card=****{self.card_last_four}, type={self.card_type})"
+            )
+        return (
+            f"Credential(type='{self.credential_type}', service='{self.service}', "
+            f"username='{self.username or self.email}')"
+        )
+
+
+# ═══════════════════════════════════════════════════════════
 # EXTRACTION MODELS (used by extraction pipeline)
 # ═══════════════════════════════════════════════════════════
 

@@ -16,6 +16,7 @@ from uuid import uuid4
 
 from .models import (
     AgentState,
+    Credential,
     Edge,
     Entity,
     Event,
@@ -395,6 +396,39 @@ class MemoryStore:
         """
         )
 
+        # Secure Credentials - for user accounts, credit cards, etc.
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS credentials (
+                id TEXT PRIMARY KEY,
+                credential_type TEXT NOT NULL,
+                service TEXT NOT NULL,
+
+                -- For user accounts
+                username TEXT,
+                email TEXT,
+                password_ref TEXT,
+
+                -- For credit cards
+                card_last_four TEXT,
+                card_type TEXT,
+                card_expiry TEXT,
+                card_ref TEXT,
+                billing_name TEXT,
+                billing_address TEXT,
+
+                -- Common fields
+                notes TEXT,
+                metadata TEXT,
+
+                -- Timestamps
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                last_used_at TEXT
+            )
+        """
+        )
+
         self.conn.commit()
 
     def _create_indices(self):
@@ -424,6 +458,9 @@ class MemoryStore:
             # Tool definitions indices
             "CREATE INDEX IF NOT EXISTS idx_tool_definitions_name ON tool_definitions(name)",
             "CREATE INDEX IF NOT EXISTS idx_tool_definitions_enabled ON tool_definitions(is_enabled)",
+            # Credentials indices
+            "CREATE INDEX IF NOT EXISTS idx_credentials_service ON credentials(service)",
+            "CREATE INDEX IF NOT EXISTS idx_credentials_type ON credentials(credential_type)",
             "CREATE INDEX IF NOT EXISTS idx_tool_definitions_dynamic ON tool_definitions(is_dynamic)",
             "CREATE INDEX IF NOT EXISTS idx_tool_definitions_category ON tool_definitions(category)",
             "CREATE INDEX IF NOT EXISTS idx_tool_definitions_error_count ON tool_definitions(error_count DESC)",
@@ -2302,6 +2339,278 @@ class MemoryStore:
     def vacuum(self):
         """Compact the database after deletions."""
         self.conn.execute("VACUUM")
+
+    # ═══════════════════════════════════════════════════════════
+    # CREDENTIALS (secure storage for accounts and payment methods)
+    # ═══════════════════════════════════════════════════════════
+
+    def store_credential(
+        self,
+        service: str,
+        credential_type: str = "account",
+        username: str | None = None,
+        email: str | None = None,
+        password_ref: str | None = None,
+        card_last_four: str | None = None,
+        card_type: str | None = None,
+        card_expiry: str | None = None,
+        card_ref: str | None = None,
+        billing_name: str | None = None,
+        billing_address: str | None = None,
+        notes: str | None = None,
+        metadata: dict | None = None,
+    ) -> Credential:
+        """Store a credential (account or credit card).
+
+        For accounts, the password should be stored in keyring first,
+        then the reference passed as password_ref.
+
+        For credit cards, the full card number should be stored in keyring,
+        then the reference passed as card_ref. Only last 4 digits stored here.
+
+        Args:
+            service: Service name (e.g., "yohei.ai", "stripe.com")
+            credential_type: "account", "credit_card", or "api_key"
+            username: Username for account
+            email: Email for account
+            password_ref: Reference to password in keyring
+            card_last_four: Last 4 digits of card
+            card_type: Card type (visa, mastercard, etc.)
+            card_expiry: Card expiry in MM/YY format
+            card_ref: Reference to full card number in keyring
+            billing_name: Name on card
+            billing_address: Billing address
+            notes: Additional notes
+            metadata: Additional metadata dict
+        """
+        cred_id = generate_id()
+        now = now_iso()
+
+        cur = self.conn.cursor()
+
+        # Check if credential for this service already exists
+        cur.execute(
+            "SELECT id FROM credentials WHERE service = ? AND credential_type = ?",
+            (service, credential_type),
+        )
+        existing = cur.fetchone()
+
+        if existing:
+            # Update existing credential
+            cur.execute(
+                """
+                UPDATE credentials SET
+                    username = COALESCE(?, username),
+                    email = COALESCE(?, email),
+                    password_ref = COALESCE(?, password_ref),
+                    card_last_four = COALESCE(?, card_last_four),
+                    card_type = COALESCE(?, card_type),
+                    card_expiry = COALESCE(?, card_expiry),
+                    card_ref = COALESCE(?, card_ref),
+                    billing_name = COALESCE(?, billing_name),
+                    billing_address = COALESCE(?, billing_address),
+                    notes = COALESCE(?, notes),
+                    metadata = COALESCE(?, metadata),
+                    updated_at = ?
+                WHERE id = ?
+            """,
+                (
+                    username,
+                    email,
+                    password_ref,
+                    card_last_four,
+                    card_type,
+                    card_expiry,
+                    card_ref,
+                    billing_name,
+                    billing_address,
+                    notes,
+                    serialize_json(metadata),
+                    now,
+                    existing["id"],
+                ),
+            )
+            self.conn.commit()
+            return self.get_credential(service, credential_type)
+
+        # Insert new credential
+        cur.execute(
+            """
+            INSERT INTO credentials (
+                id, credential_type, service, username, email, password_ref,
+                card_last_four, card_type, card_expiry, card_ref,
+                billing_name, billing_address, notes, metadata,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+            (
+                cred_id,
+                credential_type,
+                service,
+                username,
+                email,
+                password_ref,
+                card_last_four,
+                card_type,
+                card_expiry,
+                card_ref,
+                billing_name,
+                billing_address,
+                notes,
+                serialize_json(metadata),
+                now,
+                now,
+            ),
+        )
+        self.conn.commit()
+
+        return Credential(
+            id=cred_id,
+            credential_type=credential_type,
+            service=service,
+            username=username,
+            email=email,
+            password_ref=password_ref,
+            card_last_four=card_last_four,
+            card_type=card_type,
+            card_expiry=card_expiry,
+            card_ref=card_ref,
+            billing_name=billing_name,
+            billing_address=billing_address,
+            notes=notes,
+            metadata=metadata,
+            created_at=parse_datetime(now),
+            updated_at=parse_datetime(now),
+        )
+
+    def get_credential(
+        self, service: str, credential_type: str | None = None
+    ) -> Credential | None:
+        """Get a credential by service name.
+
+        Args:
+            service: Service name to look up
+            credential_type: Optional filter by type
+        """
+        cur = self.conn.cursor()
+
+        if credential_type:
+            cur.execute(
+                "SELECT * FROM credentials WHERE service = ? AND credential_type = ?",
+                (service, credential_type),
+            )
+        else:
+            cur.execute("SELECT * FROM credentials WHERE service = ?", (service,))
+
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return self._row_to_credential(row)
+
+    def get_credential_by_id(self, cred_id: str) -> Credential | None:
+        """Get a credential by ID."""
+        cur = self.conn.cursor()
+        cur.execute("SELECT * FROM credentials WHERE id = ?", (cred_id,))
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return self._row_to_credential(row)
+
+    def list_credentials(
+        self, credential_type: str | None = None, limit: int = 50
+    ) -> list[Credential]:
+        """List all credentials, optionally filtered by type.
+
+        Args:
+            credential_type: Filter by type ("account", "credit_card", "api_key")
+            limit: Maximum number to return
+        """
+        cur = self.conn.cursor()
+
+        if credential_type:
+            cur.execute(
+                """
+                SELECT * FROM credentials
+                WHERE credential_type = ?
+                ORDER BY service ASC
+                LIMIT ?
+            """,
+                (credential_type, limit),
+            )
+        else:
+            cur.execute(
+                "SELECT * FROM credentials ORDER BY service ASC LIMIT ?", (limit,)
+            )
+
+        return [self._row_to_credential(row) for row in cur.fetchall()]
+
+    def search_credentials(self, query: str, limit: int = 20) -> list[Credential]:
+        """Search credentials by service name or username/email.
+
+        Args:
+            query: Search query
+            limit: Maximum results
+        """
+        cur = self.conn.cursor()
+        pattern = f"%{query}%"
+
+        cur.execute(
+            """
+            SELECT * FROM credentials
+            WHERE service LIKE ?
+               OR username LIKE ?
+               OR email LIKE ?
+               OR billing_name LIKE ?
+            ORDER BY service ASC
+            LIMIT ?
+        """,
+            (pattern, pattern, pattern, pattern, limit),
+        )
+
+        return [self._row_to_credential(row) for row in cur.fetchall()]
+
+    def update_credential_last_used(self, cred_id: str):
+        """Update the last_used_at timestamp for a credential."""
+        cur = self.conn.cursor()
+        now = now_iso()
+        cur.execute(
+            "UPDATE credentials SET last_used_at = ?, updated_at = ? WHERE id = ?",
+            (now, now, cred_id),
+        )
+        self.conn.commit()
+
+    def delete_credential(self, cred_id: str) -> bool:
+        """Delete a credential by ID.
+
+        Returns True if deleted, False if not found.
+        """
+        cur = self.conn.cursor()
+        cur.execute("DELETE FROM credentials WHERE id = ?", (cred_id,))
+        deleted = cur.rowcount > 0
+        self.conn.commit()
+        return deleted
+
+    def _row_to_credential(self, row: sqlite3.Row) -> Credential:
+        """Convert a database row to a Credential."""
+        return Credential(
+            id=row["id"],
+            credential_type=row["credential_type"],
+            service=row["service"],
+            username=row["username"],
+            email=row["email"],
+            password_ref=row["password_ref"],
+            card_last_four=row["card_last_four"],
+            card_type=row["card_type"],
+            card_expiry=row["card_expiry"],
+            card_ref=row["card_ref"],
+            billing_name=row["billing_name"],
+            billing_address=row["billing_address"],
+            notes=row["notes"],
+            metadata=deserialize_json(row["metadata"]),
+            created_at=parse_datetime(row["created_at"]),
+            updated_at=parse_datetime(row["updated_at"]),
+            last_used_at=parse_datetime(row["last_used_at"]),
+        )
 
     # ═══════════════════════════════════════════════════════════
     # CLOSE
