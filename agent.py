@@ -13,6 +13,7 @@ Chat continues while objectives work. Objectives can spawn sub-objectives.
 """
 
 import asyncio
+import heapq
 import json
 import threading
 import time
@@ -54,6 +55,16 @@ class ToolValidationError(Exception):
     pass
 
 
+class BudgetExceededException(Exception):
+    """Raised when an objective exceeds its allocated budget."""
+    pass
+
+
+class ObjectiveCancelledException(Exception):
+    """Raised when an objective is cancelled during execution."""
+    pass
+
+
 @runtime_checkable
 class ToolLike(Protocol):
     """Protocol for duck-typed tool validation.
@@ -81,13 +92,24 @@ class Objective:
     """
     id: str
     goal: str
-    status: str = "pending"  # pending, running, completed, failed
+    status: str = "pending"  # pending, running, completed, failed, cancelled
     thread_id: str = ""
     schedule: str | None = None  # cron expression for recurring
     result: str | None = None
     error: str | None = None
     created: str = ""
     completed: str | None = None
+    # Priority: 1=highest, 10=lowest (default 5)
+    priority: int = 5
+    # Retry configuration
+    retry_count: int = 0
+    max_retries: int = 3
+    last_error: str | None = None
+    # Budget tracking
+    budget_usd: float | None = None  # Max cost allowed (None = unlimited)
+    spent_usd: float = 0.0
+    token_limit: int | None = None  # Max tokens allowed (None = unlimited)
+    tokens_used: int = 0
 
     def __post_init__(self):
         if not self.thread_id:
@@ -180,6 +202,16 @@ class Agent(EventEmitter):
         self.objectives: dict[str, Objective] = {}
         self._running_objectives: set[str] = set()
         self._lock = asyncio.Lock()
+
+        # Concurrency control for objectives
+        self.MAX_CONCURRENT_OBJECTIVES = 5
+        self._concurrency_semaphore = asyncio.Semaphore(self.MAX_CONCURRENT_OBJECTIVES)
+
+        # Cancellation tokens for stopping running objectives
+        self._cancellation_tokens: dict[str, asyncio.Event] = {}
+
+        # Priority queue for objectives: (priority, timestamp, obj_id)
+        self._objective_queue: list[tuple[int, float, str]] = []
 
         # Reference to main event loop for tools running in thread pool
         # Set when first async operation runs
@@ -792,6 +824,17 @@ Work autonomously. Use tools as needed. When done, provide a brief summary of wh
                     messages=thread
                 )
 
+                # Track budget and tokens for objectives
+                if thread_id.startswith("objective_"):
+                    obj_id = thread_id.replace("objective_", "")
+                    await self._track_objective_usage(obj_id, response)
+
+                # Check cancellation for objectives
+                if thread_id.startswith("objective_"):
+                    obj_id = thread_id.replace("objective_", "")
+                    if obj_id in self._cancellation_tokens and self._cancellation_tokens[obj_id].is_set():
+                        raise ObjectiveCancelledException(f"Objective {obj_id} was cancelled")
+
                 thread.append({"role": "assistant", "content": response.content})
 
                 if response.stop_reason == "end_turn":
@@ -831,49 +874,178 @@ Work autonomously. Use tools as needed. When done, provide a brief summary of wh
                 thread.append({"role": "user", "content": tool_results})
 
     async def run_objective(self, objective_id: str):
-        """Execute an objective in the background."""
+        """Execute an objective in the background with concurrency control and retry logic."""
         obj = self.objectives.get(objective_id)
-        if not obj or obj.status != "pending":
+        if not obj or obj.status not in ("pending", "running"):
             return
 
-        async with self._lock:
-            if objective_id in self._running_objectives:
+        # Check if cancelled before starting
+        if obj.status == "cancelled":
+            return
+
+        # Create cancellation token for this objective
+        cancel_event = self._cancellation_tokens.setdefault(objective_id, asyncio.Event())
+
+        # Acquire concurrency semaphore (limits concurrent objectives)
+        async with self._concurrency_semaphore:
+            # Check cancellation after acquiring semaphore
+            if cancel_event.is_set() or obj.status == "cancelled":
+                self._cleanup_objective(objective_id)
                 return
-            self._running_objectives.add(objective_id)
-            obj.status = "running"
 
-        # Emit objective_start event
-        self.emit("objective_start", {"id": objective_id, "goal": obj.goal})
+            async with self._lock:
+                if objective_id in self._running_objectives:
+                    return
+                self._running_objectives.add(objective_id)
+                obj.status = "running"
 
-        try:
-            # Run the objective with its own thread
-            prompt = f"""Complete this objective: {obj.goal}
+            # Emit objective_start event
+            self.emit("objective_start", {
+                "id": objective_id,
+                "goal": obj.goal,
+                "priority": obj.priority,
+                "attempt": obj.retry_count + 1
+            })
+
+            try:
+                # Run the objective with its own thread
+                prompt = f"""Complete this objective: {obj.goal}
 
 Work autonomously. Use tools as needed. When done, provide a final summary."""
 
-            result = await self.run_async(prompt, obj.thread_id)
-            obj.result = result
-            obj.status = "completed"
+                result = await self.run_async(prompt, obj.thread_id)
+
+                # Check if cancelled during execution
+                if cancel_event.is_set() or obj.status == "cancelled":
+                    self._cleanup_objective(objective_id)
+                    return
+
+                obj.result = result
+                obj.status = "completed"
+                obj.completed = datetime.now().isoformat()
+
+                # Emit objective_end event (success)
+                self.emit("objective_end", {
+                    "id": objective_id,
+                    "status": "completed",
+                    "result": result,
+                    "spent_usd": obj.spent_usd,
+                    "tokens_used": obj.tokens_used
+                })
+
+            except BudgetExceededException as e:
+                # Budget exceeded - do not retry
+                obj.status = "failed"
+                obj.error = str(e)
+                self.emit("objective_end", {
+                    "id": objective_id,
+                    "status": "failed",
+                    "error": str(e),
+                    "spent_usd": obj.spent_usd,
+                    "tokens_used": obj.tokens_used
+                })
+
+            except ObjectiveCancelledException:
+                # Cancelled - already handled
+                self._cleanup_objective(objective_id)
+
+            except Exception as e:
+                obj.last_error = str(e)
+                obj.retry_count += 1
+
+                if obj.retry_count < obj.max_retries:
+                    # Exponential backoff: 2^retry_count seconds (2s, 4s, 8s)
+                    delay = 2 ** obj.retry_count
+                    obj.status = "pending"  # Reset for retry
+
+                    self.emit("objective_retry", {
+                        "id": objective_id,
+                        "attempt": obj.retry_count,
+                        "max_retries": obj.max_retries,
+                        "delay_seconds": delay,
+                        "error": str(e)
+                    })
+
+                    # Schedule retry after delay
+                    await asyncio.sleep(delay)
+                    self._running_objectives.discard(objective_id)
+                    # Re-queue with same priority
+                    self._spawn_background_task(self.run_objective(objective_id))
+                    return
+                else:
+                    # Max retries exceeded
+                    obj.status = "failed"
+                    obj.error = f"Failed after {obj.max_retries} attempts. Last error: {e}"
+
+                    self.emit("objective_end", {
+                        "id": objective_id,
+                        "status": "failed",
+                        "error": obj.error,
+                        "attempts": obj.retry_count
+                    })
+
+            finally:
+                self._running_objectives.discard(objective_id)
+
+    def _cleanup_objective(self, objective_id: str):
+        """Clean up resources for a cancelled objective."""
+        obj = self.objectives.get(objective_id)
+        if obj:
+            obj.status = "cancelled"
             obj.completed = datetime.now().isoformat()
+        self._running_objectives.discard(objective_id)
+        self._cancellation_tokens.pop(objective_id, None)
+        self.emit("objective_end", {
+            "id": objective_id,
+            "status": "cancelled"
+        })
 
-            # Emit objective_end event (success)
-            self.emit("objective_end", {
-                "id": objective_id,
-                "status": "completed",
-                "result": result
-            })
-        except Exception as e:
-            obj.status = "failed"
-            obj.error = str(e)
+    async def _track_objective_usage(self, objective_id: str, response):
+        """Track token usage and cost for an objective, raising if budget exceeded."""
+        obj = self.objectives.get(objective_id)
+        if not obj:
+            return
 
-            # Emit objective_end event (failure)
-            self.emit("objective_end", {
-                "id": objective_id,
-                "status": "failed",
-                "error": str(e)
-            })
-        finally:
-            self._running_objectives.discard(objective_id)
+        # Extract usage from response
+        usage = getattr(response, 'usage', None)
+        if not usage:
+            return
+
+        input_tokens = getattr(usage, 'input_tokens', 0)
+        output_tokens = getattr(usage, 'output_tokens', 0)
+        total_tokens = input_tokens + output_tokens
+
+        # Update token count
+        obj.tokens_used += total_tokens
+
+        # Calculate cost (using Claude Sonnet pricing as default)
+        # Input: $3/1M tokens, Output: $15/1M tokens
+        cost = (input_tokens * 3.0 / 1_000_000) + (output_tokens * 15.0 / 1_000_000)
+        obj.spent_usd += cost
+
+        # Emit usage event
+        self.emit("objective_usage", {
+            "id": objective_id,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cost_usd": cost,
+            "total_spent_usd": obj.spent_usd,
+            "total_tokens_used": obj.tokens_used
+        })
+
+        # Check token limit
+        if obj.token_limit and obj.tokens_used >= obj.token_limit:
+            raise BudgetExceededException(
+                f"Objective {objective_id} exceeded token limit: "
+                f"{obj.tokens_used} >= {obj.token_limit} tokens"
+            )
+
+        # Check budget limit
+        if obj.budget_usd and obj.spent_usd >= obj.budget_usd:
+            raise BudgetExceededException(
+                f"Objective {objective_id} exceeded budget: "
+                f"${obj.spent_usd:.4f} >= ${obj.budget_usd:.4f}"
+            )
 
     # -------------------------------------------------------------------------
     # Scheduling
@@ -936,6 +1108,11 @@ CAPABILITIES:
 
 2. **Background Objectives**: For immediate complex tasks, use the 'objective' tool.
    Chat continues while objectives work in the background.
+   - **Priority**: Set priority 1-10 (lower = higher priority, default 5)
+   - **Budget Control**: Set budget_usd or token_limit to cap costs
+   - **Retry**: Failed objectives retry automatically (default 3 attempts) with exponential backoff
+   - **Concurrency**: Max 5 objectives run simultaneously; others queue by priority
+   - **Cancellation**: Cancel running objectives with immediate effect
 
 3. **Scheduling**: Use the 'schedule' tool for time-based automation:
    - **One-time**: "in 5m", "in 2h", "at 2024-01-15T09:00"
@@ -986,6 +1163,17 @@ Use the 'schedule' tool when the user wants something to happen:
 - On a pattern: "send me a summary every weekday at 9am" → schedule(cron)
 
 Use 'objective' for immediate background work without a time component.
+
+OBJECTIVE BEST PRACTICES:
+
+- **High priority** (1-3): Urgent tasks, time-sensitive work
+- **Normal priority** (4-6): Standard background research, reports
+- **Low priority** (7-10): Nice-to-have, exploratory tasks
+- **Budget limits**: Set budget_usd for expensive operations to prevent runaway costs
+- **Token limits**: Set token_limit for tasks that might generate excessive output
+
+Example objective with controls:
+- objective(action="spawn", goal="Research competitors", priority=2, budget_usd=0.50, max_retries=5)
 
 SCHEDULE EXAMPLES:
 - "Remind me in 30 minutes" → schedule add, spec="in 30m"
@@ -1119,28 +1307,55 @@ def _objective_tool(agent: Agent) -> Tool:
 
         if action == "spawn":
             obj_id = str(uuid.uuid4())[:8]
+            priority = params.get("priority", 5)
+            budget_usd = params.get("budget_usd")
+            token_limit = params.get("token_limit")
+            max_retries = params.get("max_retries", 3)
+
             obj = Objective(
                 id=obj_id,
                 goal=params["goal"],
-                schedule=params.get("schedule")
+                schedule=params.get("schedule"),
+                priority=priority,
+                budget_usd=budget_usd,
+                token_limit=token_limit,
+                max_retries=max_retries
             )
             ag.objectives[obj_id] = obj
+
+            # Add to priority queue
+            heapq.heappush(ag._objective_queue, (priority, time.time(), obj_id))
+
             # Start in background on main event loop (safe from thread pool)
             if not ag._spawn_background_task(ag.run_objective(obj_id)):
                 del ag.objectives[obj_id]
                 return {"error": "Agent not initialized (no event loop)"}
+
             return {
                 "spawned": obj_id,
                 "goal": obj.goal,
                 "schedule": obj.schedule,
+                "priority": obj.priority,
+                "budget_usd": obj.budget_usd,
+                "token_limit": obj.token_limit,
+                "max_retries": obj.max_retries,
                 "message": "Objective started in background. Chat can continue."
             }
 
         elif action == "list":
             return {"objectives": [
-                {"id": o.id, "goal": o.goal, "status": o.status,
-                 "schedule": o.schedule, "result": o.result[:200] if o.result else None}
-                for o in ag.objectives.values()
+                {
+                    "id": o.id,
+                    "goal": o.goal,
+                    "status": o.status,
+                    "priority": o.priority,
+                    "schedule": o.schedule,
+                    "retry_count": o.retry_count,
+                    "spent_usd": round(o.spent_usd, 6),
+                    "tokens_used": o.tokens_used,
+                    "result": o.result[:200] if o.result else None
+                }
+                for o in sorted(ag.objectives.values(), key=lambda x: (x.priority, x.created))
             ]}
 
         elif action == "check":
@@ -1149,37 +1364,68 @@ def _objective_tool(agent: Agent) -> Tool:
             if not obj:
                 return {"error": f"Objective {obj_id} not found"}
             return {
-                "id": obj.id, "goal": obj.goal, "status": obj.status,
-                "result": obj.result, "error": obj.error
+                "id": obj.id,
+                "goal": obj.goal,
+                "status": obj.status,
+                "priority": obj.priority,
+                "result": obj.result,
+                "error": obj.error,
+                "retry_count": obj.retry_count,
+                "max_retries": obj.max_retries,
+                "last_error": obj.last_error,
+                "budget_usd": obj.budget_usd,
+                "spent_usd": round(obj.spent_usd, 6),
+                "token_limit": obj.token_limit,
+                "tokens_used": obj.tokens_used,
+                "created": obj.created,
+                "completed": obj.completed
             }
 
         elif action == "cancel":
             obj_id = params["id"]
             obj = ag.objectives.get(obj_id)
-            if obj:
-                obj.status = "cancelled"
-                return {"cancelled": obj_id}
-            return {"error": f"Objective {obj_id} not found"}
+            if not obj:
+                return {"error": f"Objective {obj_id} not found"}
+
+            # Signal cancellation token
+            if obj_id in ag._cancellation_tokens:
+                ag._cancellation_tokens[obj_id].set()
+
+            obj.status = "cancelled"
+            return {
+                "cancelled": obj_id,
+                "message": "Cancellation signal sent. Running objective will stop at next checkpoint."
+            }
 
         return {"error": f"Unknown action: {action}"}
 
     return Tool(
         name="objective",
-        description="""Manage background objectives (async work).
+        description="""Manage background objectives (async work) with priority, retry, and budget controls.
 
 Actions:
-- spawn: Create new objective (goal, optional schedule like 'hourly', 'daily', 'every 5 minutes')
-- list: See all objectives and their status
-- check: Get details of specific objective (id)
-- cancel: Stop an objective (id)
+- spawn: Create new objective with options:
+  - goal: What to accomplish (required)
+  - priority: 1-10, lower = higher priority (default: 5)
+  - schedule: Recurring schedule like 'hourly', 'daily', 'every 5 minutes'
+  - budget_usd: Maximum cost allowed (stops if exceeded)
+  - token_limit: Maximum tokens allowed (stops if exceeded)
+  - max_retries: Number of retry attempts on failure (default: 3)
+- list: See all objectives sorted by priority, with status and cost tracking
+- check: Get full details of specific objective (id)
+- cancel: Stop an objective (id) - sends cancellation signal
 
-Use spawn for complex/time-consuming tasks. The objective runs in background while chat continues.""",
+Max 5 concurrent objectives. Higher priority objectives run first. Failed objectives retry with exponential backoff.""",
         parameters={
             "type": "object",
             "properties": {
                 "action": {"type": "string", "enum": ["spawn", "list", "check", "cancel"]},
                 "goal": {"type": "string", "description": "What to accomplish (for spawn)"},
                 "schedule": {"type": "string", "description": "Recurring schedule (for spawn)"},
+                "priority": {"type": "integer", "minimum": 1, "maximum": 10, "description": "Priority 1-10, lower = higher (for spawn)"},
+                "budget_usd": {"type": "number", "description": "Maximum cost in USD (for spawn)"},
+                "token_limit": {"type": "integer", "description": "Maximum tokens allowed (for spawn)"},
+                "max_retries": {"type": "integer", "minimum": 0, "maximum": 10, "description": "Retry attempts on failure (for spawn)"},
                 "id": {"type": "string", "description": "Objective ID (for check/cancel)"}
             },
             "required": ["action"]

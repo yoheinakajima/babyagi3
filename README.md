@@ -17,7 +17,16 @@ Channel input     → message
 
 This means the entire system reduces to: **a loop that processes messages and decides what to do next.**
 
-## What's New in v0.3.1
+## What's New in v0.3.2
+
+- **Objective Concurrency Control** — Max 5 concurrent objectives with semaphore-based limiting
+- **Priority Queue** — Objectives support priority 1-10 (lower = higher); higher priority runs first
+- **Retry with Backoff** — Failed objectives retry automatically with exponential backoff (2s, 4s, 8s)
+- **Budget Controls** — Set `budget_usd` or `token_limit` per objective to cap costs
+- **True Cancellation** — Cancel signals propagate to running objectives immediately
+- **Enhanced Events** — New `objective_retry` and `objective_usage` events for observability
+
+### Previous (v0.3.1)
 
 - **Skills System** — Learn new behaviors from SKILL.md files with safety scanning
 - **Composio Integration** — Connect to 250+ apps (Slack, GitHub, Notion) via OAuth
@@ -167,11 +176,21 @@ Thread {
 Objective {
   id: string
   goal: string
-  status: "pending" | "running" | "completed" | "failed"
+  status: "pending" | "running" | "completed" | "failed" | "cancelled"
   thread_id: string
   schedule: string | None
   result: string | None
   error: string | None
+  # Priority and resource controls
+  priority: int  # 1-10, lower = higher priority (default 5)
+  retry_count: int  # Current retry attempt
+  max_retries: int  # Max retry attempts (default 3)
+  last_error: string | None  # Error from last failed attempt
+  # Budget tracking
+  budget_usd: float | None  # Max cost allowed
+  spent_usd: float  # Total cost so far
+  token_limit: int | None  # Max tokens allowed
+  tokens_used: int  # Total tokens used
 }
 
 Schedule {
@@ -427,24 +446,44 @@ agent.run("Remove note 1")
 
 ### Objectives Tool
 
-Background work that runs asynchronously while chat continues.
+Background work that runs asynchronously while chat continues. Features priority queuing, automatic retry with exponential backoff, budget controls, and true cancellation.
 
 ```python
 # Start a one-time objective
 agent.run("Research the latest Claude API features and summarize them")
 
-# Check objective status
+# Start with priority (1=highest, 10=lowest)
+agent.run("Urgent: Research competitor announcement immediately")  # priority=1
+
+# Start with budget limit
+agent.run("Research market trends, but limit to $0.50")  # budget_usd=0.50
+
+# Start with token limit
+agent.run("Generate a summary, max 10000 tokens")  # token_limit=10000
+
+# Check objective status (includes cost tracking)
 agent.run("What objectives are running?")
 
-# Cancel an objective
+# Cancel an objective (immediately signals running objective to stop)
 agent.run("Cancel objective abc123")
 ```
 
 **Actions:**
-- `spawn` — Start a new background objective (goal, optional schedule)
-- `list` — See all objectives and their status
-- `check` — Get details of specific objective (id)
-- `cancel` — Stop an objective (id)
+- `spawn` — Start a new background objective with options:
+  - `goal` — What to accomplish (required)
+  - `priority` — 1-10, lower = higher priority (default: 5)
+  - `schedule` — Recurring schedule (optional)
+  - `budget_usd` — Maximum cost allowed (stops if exceeded)
+  - `token_limit` — Maximum tokens allowed (stops if exceeded)
+  - `max_retries` — Retry attempts on failure (default: 3)
+- `list` — See all objectives sorted by priority, with status and cost tracking
+- `check` — Get full details including retry count, spent_usd, tokens_used
+- `cancel` — Stop an objective (sends cancellation signal to running objectives)
+
+**Concurrency & Retry:**
+- Max 5 objectives run simultaneously; others queue by priority
+- Failed objectives retry automatically with exponential backoff (2s, 4s, 8s)
+- Budget exceeded or max retries reached → objective fails permanently
 
 ### Schedule Tool
 
@@ -888,8 +927,10 @@ The agent emits events for all key operations, making it easy to build UIs or lo
 **Available Events:**
 - `tool_start` — Tool execution starting: `{name, input}`
 - `tool_end` — Tool execution completed: `{name, result, duration_ms}`
-- `objective_start` — Background objective starting: `{id, goal}`
-- `objective_end` — Background objective completed: `{id, status, result}`
+- `objective_start` — Background objective starting: `{id, goal, priority, attempt}`
+- `objective_end` — Background objective completed: `{id, status, result, spent_usd, tokens_used}`
+- `objective_retry` — Objective retrying after failure: `{id, attempt, max_retries, delay_seconds, error}`
+- `objective_usage` — Token/cost update for objective: `{id, input_tokens, output_tokens, cost_usd, total_spent_usd, total_tokens_used}`
 - `task_start` — Scheduled task starting: `{id, name, goal}`
 - `task_end` — Scheduled task completed: `{id, status, duration_ms}`
 
@@ -1152,7 +1193,25 @@ Create a detailed report.
 
 # The agent continues to respond while the objective runs
 agent.run("While that's running, can you help me with something else?")
+
+# Priority-based execution (urgent work runs first)
+agent.run("URGENT: Check if our API is down")  # Gets priority=1
+agent.run("When you have time, research market trends")  # Gets priority=7
+
+# Cost-controlled objectives
+agent.run("Research competitors but limit cost to $1.00")  # budget_usd=1.00
+agent.run("Analyze logs but use max 50000 tokens")  # token_limit=50000
+
+# Check status with cost tracking
+agent.run("Show me all objectives with their costs")
+# Returns: id, goal, status, priority, spent_usd, tokens_used, retry_count
 ```
+
+**Resource Controls:**
+- Max 5 objectives run concurrently; others queue by priority
+- Failed objectives auto-retry with exponential backoff (2s → 4s → 8s)
+- Budget/token limits prevent runaway costs
+- Cancel immediately stops running objectives
 
 ### Scheduled Tasks
 
@@ -1268,13 +1327,23 @@ class Tool:
 class Objective:
     id: str
     goal: str
-    status: str  # "pending", "running", "completed", "failed"
+    status: str  # "pending", "running", "completed", "failed", "cancelled"
     thread_id: str
     schedule: str | None
     result: str | None
     error: str | None
     created: str
     completed: str | None
+    # Priority and retry controls
+    priority: int = 5  # 1-10, lower = higher priority
+    retry_count: int = 0
+    max_retries: int = 3
+    last_error: str | None = None
+    # Budget tracking
+    budget_usd: float | None = None  # Max cost allowed
+    spent_usd: float = 0.0
+    token_limit: int | None = None  # Max tokens allowed
+    tokens_used: int = 0
 ```
 
 ### Schedule
