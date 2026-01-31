@@ -388,6 +388,54 @@ def search_credentials(query: str, agent=None) -> dict:
     }
 
 
+@tool
+def list_payment_methods(agent=None) -> dict:
+    """List all stored payment methods (credit cards) - ONLY shows safe info.
+
+    Returns masked card numbers (****1234), card types, and expiry dates.
+    The full card numbers are NEVER returned or shown.
+
+    Use browse_checkout() to use a card for payment - it will securely
+    inject the card data without ever exposing it.
+    """
+    cards = []
+
+    if agent and hasattr(agent, 'memory') and agent.memory is not None:
+        try:
+            creds = agent.memory.store.list_credentials(credential_type="credit_card")
+            for cred in creds:
+                card_info = {
+                    "service": cred.service,
+                    "card_type": cred.card_type,
+                    "card_masked": f"****{cred.card_last_four}" if cred.card_last_four else "****",
+                    "card_expiry": cred.card_expiry,
+                    "billing_name": cred.billing_name,
+                }
+                cards.append(card_info)
+
+            if cards:
+                return {
+                    "count": len(cards),
+                    "payment_methods": cards,
+                    "usage_hint": "Use browse_checkout(checkout_url, card_service='service_name') to pay with a card",
+                    "security_note": "Full card numbers are never shown. They go directly to the browser when needed."
+                }
+            else:
+                return {
+                    "count": 0,
+                    "payment_methods": [],
+                    "message": "No payment methods stored. Use store_credential() with credential_type='credit_card' to add one."
+                }
+        except Exception as e:
+            return {"error": f"Failed to list payment methods: {str(e)}"}
+
+    return {
+        "count": 0,
+        "payment_methods": [],
+        "message": "Memory store not available"
+    }
+
+
 @tool(packages=["keyring"])
 def delete_credential(service: str, credential_type: str = None, agent=None) -> dict:
     """Delete a stored credential.

@@ -894,6 +894,19 @@ Example: After creating an account on example.com:
 
 This ensures credentials persist across sessions and can be retrieved later.
 
+PAYMENT SECURITY (CRITICAL):
+When handling credit card payments:
+1. NEVER ask users to share full card numbers in chat - use store_credential() with credential_type="credit_card"
+2. NEVER use get_credential(include_secrets=True) for credit cards - you don't need to see the number
+3. For checkouts, use browse_checkout(checkout_url, card_service="service_name") - it securely injects card data
+4. Use list_payment_methods() to see stored cards (shows only ****1234 format)
+5. Card numbers flow directly from keyring to browser - they are NEVER in your context
+
+SECURE PAYMENT WORKFLOW:
+1. Store card once: store_credential(service="payment", credential_type="credit_card", card_number="...", card_expiry="MM/YY", card_cvv="...", billing_name="...")
+2. For payment: browse_checkout(checkout_url="https://...", card_service="payment")
+3. The card data goes directly to the browser - you only see ****1234
+
 WHEN TO USE SCHEDULING:
 
 Use the 'schedule' tool when the user wants something to happen:
