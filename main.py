@@ -91,8 +91,20 @@ async def run_cli_only():
         verbose_config = config.get("verbose", "off")
         console.set_verbose(verbose_config)
 
-    # Initialize agent
+    # Initialize agent (memory status is printed during initialization)
     agent = Agent(config=config)
+
+    # Start optional memory background tasks
+    background_tasks = []
+    if agent.memory is not None:
+        memory_config = config.get("memory", {})
+        if memory_config.get("background_extraction", True):
+            from memory.integration import create_extraction_background_task
+            extraction_loop = create_extraction_background_task(
+                agent.memory,
+                interval_seconds=memory_config.get("extraction_interval", 60)
+            )
+            background_tasks.append(asyncio.create_task(extraction_loop()))
 
     # Start CLI listener first (includes greeting), then start scheduler
     # Scheduler is started inside the listener after greeting displays
@@ -100,6 +112,12 @@ async def run_cli_only():
         await run_cli_listener(agent, config.get("channels", {}).get("cli", {}), start_scheduler=True)
     except KeyboardInterrupt:
         console.system("\nGoodbye!")
+    finally:
+        # Clean up background tasks
+        for task in background_tasks:
+            task.cancel()
+        if agent.memory is not None:
+            agent.memory.store.close()
 
 
 async def run_all_channels():
@@ -117,7 +135,7 @@ async def run_all_channels():
         verbose_config = config.get("verbose", "off")
         console.set_verbose(verbose_config)
 
-    # Initialize agent with config
+    # Initialize agent with config (memory status is printed during initialization)
     agent = Agent(config=config)
 
     # Register senders for enabled channels
@@ -128,6 +146,17 @@ async def run_all_channels():
 
     # Always run scheduler
     tasks.append(agent.run_scheduler())
+
+    # Memory background extraction task (if SQLite memory is active)
+    if agent.memory is not None:
+        memory_config = config.get("memory", {})
+        if memory_config.get("background_extraction", True):
+            from memory.integration import create_extraction_background_task
+            extraction_loop = create_extraction_background_task(
+                agent.memory,
+                interval_seconds=memory_config.get("extraction_interval", 60)
+            )
+            tasks.append(extraction_loop())
 
     # CLI (always enabled, but check config)
     if is_channel_enabled(config, "cli"):
@@ -166,6 +195,10 @@ async def run_all_channels():
         await asyncio.gather(*tasks)
     except KeyboardInterrupt:
         logger.info("Shutting down...")
+    finally:
+        # Clean up memory
+        if agent.memory is not None:
+            agent.memory.store.close()
 
 
 def _register_senders(agent, config):
