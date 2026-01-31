@@ -147,8 +147,35 @@ class MemoryStore:
         """Initialize the database schema."""
         self._create_tables()
         self._create_indices()
+        self._migrate_tool_definitions()
         self._ensure_root_node()
         self._ensure_agent_state()
+
+    def _migrate_tool_definitions(self):
+        """Add new columns to tool_definitions for skills and composio support."""
+        cur = self.conn.cursor()
+
+        # Get existing columns
+        cur.execute("PRAGMA table_info(tool_definitions)")
+        existing_columns = {row["name"] for row in cur.fetchall()}
+
+        # Add new columns if they don't exist
+        migrations = [
+            ("tool_type", "TEXT DEFAULT 'executable'"),
+            ("skill_content", "TEXT"),
+            ("composio_app", "TEXT"),
+            ("composio_action", "TEXT"),
+            ("depends_on", "TEXT"),
+        ]
+
+        for col_name, col_def in migrations:
+            if col_name not in existing_columns:
+                try:
+                    cur.execute(f"ALTER TABLE tool_definitions ADD COLUMN {col_name} {col_def}")
+                except sqlite3.OperationalError:
+                    pass  # Column might already exist
+
+        self.conn.commit()
 
     def _create_tables(self):
         """Create all tables."""
@@ -331,12 +358,25 @@ class MemoryStore:
                 name TEXT NOT NULL UNIQUE,
                 description TEXT NOT NULL,
 
+                -- Tool type: "executable", "skill", "composio"
+                tool_type TEXT DEFAULT 'executable',
+
                 -- Definition (what makes it executable)
                 source_code TEXT,
                 parameters TEXT,
                 packages TEXT,
                 env TEXT,
                 tool_var_name TEXT,
+
+                -- For skills
+                skill_content TEXT,
+
+                -- For composio tools
+                composio_app TEXT,
+                composio_action TEXT,
+
+                -- Dependencies (JSON list of tool names this depends on)
+                depends_on TEXT,
 
                 -- Category
                 category TEXT DEFAULT 'custom',
@@ -458,12 +498,14 @@ class MemoryStore:
             # Tool definitions indices
             "CREATE INDEX IF NOT EXISTS idx_tool_definitions_name ON tool_definitions(name)",
             "CREATE INDEX IF NOT EXISTS idx_tool_definitions_enabled ON tool_definitions(is_enabled)",
-            # Credentials indices
-            "CREATE INDEX IF NOT EXISTS idx_credentials_service ON credentials(service)",
-            "CREATE INDEX IF NOT EXISTS idx_credentials_type ON credentials(credential_type)",
             "CREATE INDEX IF NOT EXISTS idx_tool_definitions_dynamic ON tool_definitions(is_dynamic)",
             "CREATE INDEX IF NOT EXISTS idx_tool_definitions_category ON tool_definitions(category)",
             "CREATE INDEX IF NOT EXISTS idx_tool_definitions_error_count ON tool_definitions(error_count DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_tool_definitions_tool_type ON tool_definitions(tool_type)",
+            "CREATE INDEX IF NOT EXISTS idx_tool_definitions_composio_app ON tool_definitions(composio_app)",
+            # Credentials indices
+            "CREATE INDEX IF NOT EXISTS idx_credentials_service ON credentials(service)",
+            "CREATE INDEX IF NOT EXISTS idx_credentials_type ON credentials(credential_type)",
         ]
 
         for idx in indices:
@@ -1653,12 +1695,25 @@ class MemoryStore:
         category: str = "custom",
         is_dynamic: bool = True,
         created_by_event_id: str | None = None,
+        # New fields for skills and composio
+        tool_type: str = "executable",
+        skill_content: str | None = None,
+        composio_app: str | None = None,
+        composio_action: str | None = None,
+        depends_on: list[str] | None = None,
     ) -> ToolDefinition:
         """
         Save or update a tool definition.
 
         If a tool with this name exists, updates it (increments version).
         Otherwise creates a new tool definition.
+
+        Args:
+            tool_type: "executable" (default), "skill", or "composio"
+            skill_content: For skills - the SKILL.md markdown instructions
+            composio_app: For composio - app name like "SLACK", "GITHUB"
+            composio_action: For composio - action name like "SLACK_SEND_MESSAGE"
+            depends_on: List of tool names this tool depends on
         """
         cur = self.conn.cursor()
         now = now_iso()
@@ -1674,11 +1729,16 @@ class MemoryStore:
                 """
                 UPDATE tool_definitions SET
                     description = ?,
+                    tool_type = ?,
                     source_code = ?,
                     parameters = ?,
                     packages = ?,
                     env = ?,
                     tool_var_name = ?,
+                    skill_content = ?,
+                    composio_app = ?,
+                    composio_action = ?,
+                    depends_on = ?,
                     category = ?,
                     is_dynamic = ?,
                     version = ?,
@@ -1687,11 +1747,16 @@ class MemoryStore:
             """,
                 (
                     description,
+                    tool_type,
                     source_code,
                     serialize_json(parameters),
                     serialize_json(packages or []),
                     serialize_json(env or []),
                     tool_var_name,
+                    skill_content,
+                    composio_app,
+                    composio_action,
+                    serialize_json(depends_on or []),
                     category,
                     1 if is_dynamic else 0,
                     new_version,
@@ -1724,21 +1789,27 @@ class MemoryStore:
         cur.execute(
             """
             INSERT INTO tool_definitions (
-                id, name, description, source_code, parameters, packages, env,
-                tool_var_name, category, is_enabled, is_dynamic,
+                id, name, description, tool_type, source_code, parameters, packages, env,
+                tool_var_name, skill_content, composio_app, composio_action, depends_on,
+                category, is_enabled, is_dynamic,
                 entity_id, summary_node_id, created_by_event_id,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
         """,
             (
                 tool_id,
                 name,
                 description,
+                tool_type,
                 source_code,
                 serialize_json(parameters),
                 serialize_json(packages or []),
                 serialize_json(env or []),
                 tool_var_name,
+                skill_content,
+                composio_app,
+                composio_action,
+                serialize_json(depends_on or []),
                 category,
                 1 if is_dynamic else 0,
                 entity.id,
@@ -1754,11 +1825,16 @@ class MemoryStore:
             id=tool_id,
             name=name,
             description=description,
+            tool_type=tool_type,
             source_code=source_code,
             parameters=parameters,
             packages=packages or [],
             env=env or [],
             tool_var_name=tool_var_name,
+            skill_content=skill_content,
+            composio_app=composio_app,
+            composio_action=composio_action,
+            depends_on=depends_on or [],
             category=category,
             is_enabled=True,
             is_dynamic=is_dynamic,
@@ -1825,6 +1901,67 @@ class MemoryStore:
             ORDER BY name
         """,
             (category,),
+        )
+        return [self._row_to_tool_definition(row) for row in cur.fetchall()]
+
+    def get_tools_by_type(self, tool_type: str, enabled_only: bool = True) -> list[ToolDefinition]:
+        """Get all tools of a specific type (executable, skill, composio)."""
+        cur = self.conn.cursor()
+        if enabled_only:
+            cur.execute(
+                """
+                SELECT * FROM tool_definitions
+                WHERE tool_type = ? AND is_enabled = 1
+                ORDER BY name
+            """,
+                (tool_type,),
+            )
+        else:
+            cur.execute(
+                "SELECT * FROM tool_definitions WHERE tool_type = ? ORDER BY name",
+                (tool_type,),
+            )
+        return [self._row_to_tool_definition(row) for row in cur.fetchall()]
+
+    def get_skills(self, enabled_only: bool = True) -> list[ToolDefinition]:
+        """Get all skill-type tools."""
+        return self.get_tools_by_type("skill", enabled_only)
+
+    def get_composio_tools(self, app: str | None = None, enabled_only: bool = True) -> list[ToolDefinition]:
+        """Get all composio-type tools, optionally filtered by app."""
+        cur = self.conn.cursor()
+        if app:
+            if enabled_only:
+                cur.execute(
+                    """
+                    SELECT * FROM tool_definitions
+                    WHERE tool_type = 'composio' AND composio_app = ? AND is_enabled = 1
+                    ORDER BY name
+                """,
+                    (app,),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT * FROM tool_definitions
+                    WHERE tool_type = 'composio' AND composio_app = ?
+                    ORDER BY name
+                """,
+                    (app,),
+                )
+        else:
+            return self.get_tools_by_type("composio", enabled_only)
+        return [self._row_to_tool_definition(row) for row in cur.fetchall()]
+
+    def get_tools_with_dependencies(self) -> list[ToolDefinition]:
+        """Get all tools that have dependencies on other tools."""
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            SELECT * FROM tool_definitions
+            WHERE depends_on IS NOT NULL AND depends_on != '[]' AND is_enabled = 1
+            ORDER BY name
+        """
         )
         return [self._row_to_tool_definition(row) for row in cur.fetchall()]
 
@@ -2104,15 +2241,23 @@ class MemoryStore:
 
     def _row_to_tool_definition(self, row: sqlite3.Row) -> ToolDefinition:
         """Convert a database row to a ToolDefinition."""
+        # Handle potentially missing columns for backward compatibility
+        row_dict = dict(row)
+
         return ToolDefinition(
             id=row["id"],
             name=row["name"],
             description=row["description"],
+            tool_type=row_dict.get("tool_type") or "executable",
             source_code=row["source_code"],
             parameters=deserialize_json(row["parameters"]) or {},
             packages=deserialize_json(row["packages"]) or [],
             env=deserialize_json(row["env"]) or [],
             tool_var_name=row["tool_var_name"],
+            skill_content=row_dict.get("skill_content"),
+            composio_app=row_dict.get("composio_app"),
+            composio_action=row_dict.get("composio_action"),
+            depends_on=deserialize_json(row_dict.get("depends_on")) or [],
             category=row["category"],
             is_enabled=bool(row["is_enabled"]),
             is_dynamic=bool(row["is_dynamic"]),
