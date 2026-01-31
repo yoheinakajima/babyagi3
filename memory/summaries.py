@@ -8,6 +8,7 @@ import heapq
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from metrics import InstrumentedAnthropic, track_source
 from .embeddings import get_embedding
 from .models import SummaryNode
 
@@ -142,11 +143,9 @@ class SummaryManager:
 
     @property
     def client(self):
-        """Get Anthropic client."""
+        """Get instrumented Anthropic client for metrics tracking."""
         if self._client is None:
-            import anthropic
-
-            self._client = anthropic.Anthropic()
+            self._client = InstrumentedAnthropic()
         return self._client
 
     @property
@@ -260,11 +259,12 @@ Generate a concise summary (2-5 sentences) that:
 
 Summary:"""
 
-        response = self.client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=500,
-            messages=[{"role": "user", "content": prompt}],
-        )
+        with track_source("summary"):
+            response = self.client.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=500,
+                messages=[{"role": "user", "content": prompt}],
+            )
 
         new_summary = response.content[0].text.strip()
 
@@ -311,11 +311,12 @@ Generate a concise summary (3-7 sentences) that:
 
 Summary:"""
 
-        response = self.client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=500,
-            messages=[{"role": "user", "content": prompt}],
-        )
+        with track_source("summary"):
+            response = self.client.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=500,
+                messages=[{"role": "user", "content": prompt}],
+            )
 
         new_summary = response.content[0].text.strip()
 
@@ -364,11 +365,12 @@ Generate a brief overview (3-5 sentences) that:
 
 Overview:"""
 
-        response = self.client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=400,
-            messages=[{"role": "user", "content": prompt}],
-        )
+        with track_source("summary"):
+            response = self.client.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=400,
+                messages=[{"role": "user", "content": prompt}],
+            )
 
         new_summary = response.content[0].text.strip()
 

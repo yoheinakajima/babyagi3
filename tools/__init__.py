@@ -297,7 +297,7 @@ def get_all_tools(tool_class):
         tool_class: The Tool class from agent.py
     """
     # Import all tool modules to trigger registration
-    from tools import web, email, secrets, verbose, credentials
+    from tools import web, email, secrets, verbose, credentials, metrics
 
     tools = []
     for info in _registered_tools:
@@ -322,7 +322,7 @@ def get_registered_tool_info() -> list[dict]:
     """
     # Ensure tools are imported
     try:
-        from tools import web, email, secrets, verbose, credentials
+        from tools import web, email, secrets, verbose, credentials, metrics
     except ImportError:
         pass
 

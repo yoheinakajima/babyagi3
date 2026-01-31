@@ -8,6 +8,7 @@ Deep Retrieval: Agentic, thorough, invoked for complex queries
 from datetime import datetime
 from typing import Any
 
+from metrics import InstrumentedAnthropic, track_source
 from .embeddings import cosine_similarity, get_embedding
 from .models import Edge, Entity, Event, SummaryNode, Task, Topic
 
@@ -451,11 +452,9 @@ class DeepRetrievalAgent:
 
     @property
     def client(self):
-        """Get Anthropic client."""
+        """Get instrumented Anthropic client for metrics tracking."""
         if self._client is None:
-            import anthropic
-
-            self._client = anthropic.Anthropic()
+            self._client = InstrumentedAnthropic()
         return self._client
 
     def get_tools(self) -> list[dict]:
@@ -808,13 +807,14 @@ Be thorough but efficient. Stop when you have enough information to answer confi
         max_turns = 10
 
         for _ in range(max_turns):
-            response = self.client.messages.create(
-                model="claude-sonnet-4-20250514",
-                max_tokens=4096,
-                system=system_prompt,
-                tools=tools,
-                messages=messages,
-            )
+            with track_source("retrieval"):
+                response = self.client.messages.create(
+                    model="claude-sonnet-4-20250514",
+                    max_tokens=4096,
+                    system=system_prompt,
+                    tools=tools,
+                    messages=messages,
+                )
 
             # Check if we're done
             if response.stop_reason == "end_turn":

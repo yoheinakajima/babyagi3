@@ -23,6 +23,12 @@ from typing import Callable, Protocol, runtime_checkable
 
 import anthropic
 
+from metrics import (
+    InstrumentedAsyncAnthropic,
+    MetricsCollector,
+    set_event_emitter,
+    track_source,
+)
 from scheduler import (
     Scheduler, ScheduledTask, Schedule, SchedulerStore,
     create_task, parse_schedule, RunRecord
@@ -164,7 +170,10 @@ class Agent(EventEmitter):
     def __init__(self, model: str = "claude-sonnet-4-20250514", load_tools: bool = True, config: dict = None):
         self.__init_events__()  # Initialize event system
 
-        self.client = anthropic.AsyncAnthropic()
+        # Use instrumented client for automatic metrics tracking
+        self.client = InstrumentedAsyncAnthropic()
+        set_event_emitter(self)  # Agent is an EventEmitter, metrics emit through it
+
         self.model = model
         self.tools: dict[str, Tool] = {}
         self.threads: dict[str, list] = {"main": []}
@@ -191,6 +200,13 @@ class Agent(EventEmitter):
 
         # Memory system - try SQLite, gracefully fall back to in-memory
         self.memory = self._initialize_memory()
+
+        # Metrics collector for tracking costs and performance
+        self.metrics_collector = MetricsCollector(
+            store=self.memory.store if self.memory else None
+        )
+        self.metrics_collector.attach(self)
+        _set_metrics_collector(self.metrics_collector)  # Set global for tool access
 
         # Register core tools
         self._register_core_tools()
@@ -1768,6 +1784,24 @@ Be concise. Mention what you can help with based on available tools. If any tool
         print("\nGoodbye!")
     finally:
         scheduler_task.cancel()
+
+
+# ═══════════════════════════════════════════════════════════
+# GLOBAL METRICS ACCESSOR
+# ═══════════════════════════════════════════════════════════
+
+_metrics_collector_instance: MetricsCollector | None = None
+
+
+def _set_metrics_collector(collector: MetricsCollector):
+    """Set the global metrics collector instance."""
+    global _metrics_collector_instance
+    _metrics_collector_instance = collector
+
+
+def _get_metrics_collector() -> MetricsCollector | None:
+    """Get the global metrics collector instance for tool access."""
+    return _metrics_collector_instance
 
 
 def main():

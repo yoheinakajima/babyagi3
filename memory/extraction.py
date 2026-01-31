@@ -9,6 +9,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime
 
+from metrics import InstrumentedAnthropic, track_source
 from .embeddings import get_embedding
 from .models import (
     Event,
@@ -50,11 +51,9 @@ class ExtractionPipeline:
 
     @property
     def client(self):
-        """Get Anthropic client."""
+        """Get instrumented Anthropic client for metrics tracking."""
         if self._client is None:
-            import anthropic
-
-            self._client = anthropic.Anthropic()
+            self._client = InstrumentedAnthropic()
         return self._client
 
     async def extract(self, event: Event) -> ExtractionResult:
@@ -266,12 +265,13 @@ Content:
 
 Extract entities, relationships, and topics from this event."""
 
-        response = self.client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=2048,
-            system=system_prompt,
-            messages=[{"role": "user", "content": user_message}],
-        )
+        with track_source("extraction"):
+            response = self.client.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=2048,
+                system=system_prompt,
+                messages=[{"role": "user", "content": user_message}],
+            )
 
         # Parse response
         response_text = response.content[0].text
@@ -492,11 +492,12 @@ Categories:
 Respond with only the category name, nothing else."""
 
         try:
-            response = self.client.messages.create(
-                model="claude-haiku-3-5-20241022",
-                max_tokens=20,
-                messages=[{"role": "user", "content": prompt}],
-            )
+            with track_source("extraction"):
+                response = self.client.messages.create(
+                    model="claude-haiku-3-5-20241022",
+                    max_tokens=20,
+                    messages=[{"role": "user", "content": prompt}],
+                )
             result = response.content[0].text.strip().lower()
 
             # Validate result
@@ -538,11 +539,12 @@ Categories:
 Respond with only the category name, nothing else."""
 
         try:
-            response = self.client.messages.create(
-                model="claude-haiku-3-5-20241022",
-                max_tokens=20,
-                messages=[{"role": "user", "content": prompt}],
-            )
+            with track_source("extraction"):
+                response = self.client.messages.create(
+                    model="claude-haiku-3-5-20241022",
+                    max_tokens=20,
+                    messages=[{"role": "user", "content": prompt}],
+                )
             result = response.content[0].text.strip().lower()
 
             # Validate result

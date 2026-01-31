@@ -15,6 +15,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
+from metrics import InstrumentedOpenAI
+
 # Default embedding model
 DEFAULT_MODEL = "text-embedding-3-small"
 EMBEDDING_DIM = 1536
@@ -208,11 +210,10 @@ class OpenAIEmbeddings(EmbeddingProvider):
 
     @property
     def client(self):
+        """Get instrumented OpenAI client for metrics tracking."""
         if self._client is None:
             try:
-                from openai import OpenAI
-
-                self._client = OpenAI()
+                self._client = InstrumentedOpenAI()
             except ImportError:
                 raise ImportError("openai package required for OpenAI embeddings")
         return self._client

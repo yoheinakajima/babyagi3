@@ -469,6 +469,40 @@ class MemoryStore:
         """
         )
 
+        # Metrics tables
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS llm_calls (
+                id TEXT PRIMARY KEY,
+                timestamp TEXT NOT NULL,
+                source TEXT NOT NULL,
+                model TEXT NOT NULL,
+                thread_id TEXT,
+                input_tokens INTEGER NOT NULL,
+                output_tokens INTEGER NOT NULL,
+                cost_usd REAL NOT NULL,
+                duration_ms INTEGER NOT NULL,
+                stop_reason TEXT
+            )
+        """
+        )
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS embedding_calls (
+                id TEXT PRIMARY KEY,
+                timestamp TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                model TEXT NOT NULL,
+                text_count INTEGER NOT NULL,
+                token_estimate INTEGER NOT NULL,
+                cost_usd REAL NOT NULL,
+                duration_ms INTEGER NOT NULL,
+                cached INTEGER NOT NULL DEFAULT 0
+            )
+        """
+        )
+
         self.conn.commit()
 
     def _create_indices(self):
@@ -506,6 +540,13 @@ class MemoryStore:
             # Credentials indices
             "CREATE INDEX IF NOT EXISTS idx_credentials_service ON credentials(service)",
             "CREATE INDEX IF NOT EXISTS idx_credentials_type ON credentials(credential_type)",
+            # Metrics indices
+            "CREATE INDEX IF NOT EXISTS idx_llm_calls_timestamp ON llm_calls(timestamp DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_llm_calls_source ON llm_calls(source)",
+            "CREATE INDEX IF NOT EXISTS idx_llm_calls_model ON llm_calls(model)",
+            "CREATE INDEX IF NOT EXISTS idx_llm_calls_thread ON llm_calls(thread_id)",
+            "CREATE INDEX IF NOT EXISTS idx_embedding_calls_timestamp ON embedding_calls(timestamp DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_embedding_calls_model ON embedding_calls(model)",
         ]
 
         for idx in indices:
@@ -2756,6 +2797,160 @@ class MemoryStore:
             updated_at=parse_datetime(row["updated_at"]),
             last_used_at=parse_datetime(row["last_used_at"]),
         )
+
+    # ═══════════════════════════════════════════════════════════
+    # METRICS
+    # ═══════════════════════════════════════════════════════════
+
+    def record_llm_call(self, metric) -> None:
+        """
+        Record an LLM API call metric.
+
+        Args:
+            metric: LLMCallMetric instance from metrics.models
+        """
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO llm_calls
+            (id, timestamp, source, model, thread_id, input_tokens,
+             output_tokens, cost_usd, duration_ms, stop_reason)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+            (
+                metric.id,
+                metric.timestamp.isoformat(),
+                metric.source,
+                metric.model,
+                metric.thread_id,
+                metric.input_tokens,
+                metric.output_tokens,
+                metric.cost_usd,
+                metric.duration_ms,
+                metric.stop_reason,
+            ),
+        )
+        self.conn.commit()
+
+    def record_embedding_call(self, metric) -> None:
+        """
+        Record an embedding API call metric.
+
+        Args:
+            metric: EmbeddingCallMetric instance from metrics.models
+        """
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO embedding_calls
+            (id, timestamp, provider, model, text_count,
+             token_estimate, cost_usd, duration_ms, cached)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+            (
+                metric.id,
+                metric.timestamp.isoformat(),
+                metric.provider,
+                metric.model,
+                metric.text_count,
+                metric.token_estimate,
+                metric.cost_usd,
+                metric.duration_ms,
+                1 if metric.cached else 0,
+            ),
+        )
+        self.conn.commit()
+
+    def get_llm_call_stats(
+        self,
+        source: str | None = None,
+        since: str | None = None,
+    ) -> dict:
+        """
+        Get aggregated LLM call statistics.
+
+        Args:
+            source: Filter by source (optional)
+            since: ISO timestamp to filter from (optional)
+
+        Returns:
+            Dict with call_count, total_tokens, total_cost, avg_latency_ms
+        """
+        cur = self.conn.cursor()
+
+        query = "SELECT * FROM llm_calls WHERE 1=1"
+        params = []
+
+        if source:
+            query += " AND source = ?"
+            params.append(source)
+
+        if since:
+            query += " AND timestamp >= ?"
+            params.append(since)
+
+        cur.execute(query, params)
+        rows = cur.fetchall()
+
+        if not rows:
+            return {
+                "call_count": 0,
+                "total_tokens": 0,
+                "total_cost": 0.0,
+                "avg_latency_ms": 0.0,
+            }
+
+        total_tokens = sum(r["input_tokens"] + r["output_tokens"] for r in rows)
+        total_cost = sum(r["cost_usd"] for r in rows)
+        total_latency = sum(r["duration_ms"] for r in rows)
+
+        return {
+            "call_count": len(rows),
+            "total_tokens": total_tokens,
+            "total_cost": total_cost,
+            "avg_latency_ms": total_latency / len(rows),
+        }
+
+    def get_embedding_call_stats(self, since: str | None = None) -> dict:
+        """
+        Get aggregated embedding call statistics.
+
+        Args:
+            since: ISO timestamp to filter from (optional)
+
+        Returns:
+            Dict with call_count, text_count, total_cost, cache_hit_rate
+        """
+        cur = self.conn.cursor()
+
+        query = "SELECT * FROM embedding_calls WHERE 1=1"
+        params = []
+
+        if since:
+            query += " AND timestamp >= ?"
+            params.append(since)
+
+        cur.execute(query, params)
+        rows = cur.fetchall()
+
+        if not rows:
+            return {
+                "call_count": 0,
+                "text_count": 0,
+                "total_cost": 0.0,
+                "cache_hit_rate": 0.0,
+            }
+
+        cached_count = sum(1 for r in rows if r["cached"])
+        text_count = sum(r["text_count"] for r in rows)
+        total_cost = sum(r["cost_usd"] for r in rows)
+
+        return {
+            "call_count": len(rows),
+            "text_count": text_count,
+            "total_cost": total_cost,
+            "cache_hit_rate": cached_count / len(rows) * 100,
+        }
 
     # ═══════════════════════════════════════════════════════════
     # CLOSE
