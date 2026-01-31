@@ -377,11 +377,24 @@ class Agent(EventEmitter):
         self.register(_register_tool_tool(self))
         self.register(_send_message_tool(self))
 
+        # Register skill and composio management tools
+        try:
+            from tools.skills import get_skill_tools
+            for tool in get_skill_tools(self, Tool):
+                self.register(tool)
+        except ImportError:
+            pass  # Skills module not available
+
     def _load_persisted_tools(self):
         """Load dynamically-created tools from the database on startup.
 
         This enables self-improvement: tools the agent creates persist
         across restarts and are automatically reloaded.
+
+        Handles three tool types:
+        - "executable": Python code that runs directly
+        - "skill": Returns behavioral instructions when called
+        - "composio": Thin wrapper that calls Composio library
 
         Tools that fail to load are disabled rather than crashing.
         """
@@ -395,10 +408,41 @@ class Agent(EventEmitter):
 
             loaded = 0
             failed = 0
+            skills_loaded = 0
+            composio_loaded = 0
+
+            # Try to import skill helpers
+            try:
+                from tools.skills import create_skill_tool, create_composio_tool
+                skills_available = True
+            except ImportError:
+                skills_available = False
+
+            # Try to get composio client for composio tools
+            composio_client = None
+            try:
+                from composio import Composio
+                composio_client = Composio()
+            except Exception:
+                pass  # Composio not available
 
             for tool_def in tool_defs:
                 try:
-                    tool = self._reconstruct_tool(tool_def)
+                    tool = None
+                    tool_type = getattr(tool_def, 'tool_type', 'executable') or 'executable'
+
+                    if tool_type == "skill" and skills_available:
+                        # Skill tool - returns instructions
+                        tool = create_skill_tool(tool_def, Tool)
+                        skills_loaded += 1
+                    elif tool_type == "composio" and composio_client:
+                        # Composio tool - wraps Composio API
+                        tool = create_composio_tool(tool_def, Tool, composio_client)
+                        composio_loaded += 1
+                    else:
+                        # Executable tool - reconstruct from source code
+                        tool = self._reconstruct_tool(tool_def)
+
                     if tool:
                         # Register without emitting event (already persisted)
                         self.tools[tool.name] = tool
@@ -415,11 +459,22 @@ class Agent(EventEmitter):
                         pass  # Best effort disable
 
             if loaded > 0 or failed > 0:
+                details = []
+                if skills_loaded > 0:
+                    details.append(f"{skills_loaded} skills")
+                if composio_loaded > 0:
+                    details.append(f"{composio_loaded} composio")
+                exec_count = loaded - skills_loaded - composio_loaded
+                if exec_count > 0:
+                    details.append(f"{exec_count} executable")
+
+                detail_str = f" ({', '.join(details)})" if details else ""
+
                 if failed == 0:
-                    console.success(f"Tools: loaded {loaded} persisted tool(s)")
+                    console.success(f"Tools: loaded {loaded} persisted tool(s){detail_str}")
                 else:
                     console.warning(
-                        f"Tools: loaded {loaded}, disabled {failed} broken tool(s)"
+                        f"Tools: loaded {loaded}{detail_str}, disabled {failed} broken tool(s)"
                     )
 
         except Exception as e:

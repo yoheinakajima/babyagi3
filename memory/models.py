@@ -310,11 +310,19 @@ class ToolDefinition:
 
     Tools are also represented as Entities in the knowledge graph, allowing
     the agent to query "what tools do I have?" and track relationships.
+
+    Tool Types:
+    - "executable": Python code that runs directly (default)
+    - "skill": Returns behavioral instructions when called
+    - "composio": Thin wrapper that calls Composio library
     """
 
     id: str
     name: str  # Unique identifier (tool name)
     description: str
+
+    # Tool type (NEW)
+    tool_type: str = "executable"  # "executable" | "skill" | "composio"
 
     # Definition (what makes it executable)
     source_code: str | None = None  # Python code for dynamic tools
@@ -323,8 +331,18 @@ class ToolDefinition:
     env: list[str] = field(default_factory=list)  # Required env vars
     tool_var_name: str | None = None  # Variable name in source code (e.g., "my_tool")
 
+    # For skills (NEW)
+    skill_content: str | None = None  # The SKILL.md markdown instructions
+
+    # For composio tools (NEW)
+    composio_app: str | None = None  # "SLACK", "GITHUB", etc.
+    composio_action: str | None = None  # "SLACK_SEND_MESSAGE", etc.
+
+    # Dependencies - tools/skills this depends on (NEW)
+    depends_on: list[str] = field(default_factory=list)
+
     # Category for organization
-    category: str = "custom"  # "core", "builtin", "custom", "search", "communication", etc.
+    category: str = "custom"  # "core", "builtin", "custom", "skill", "composio", etc.
 
     # State
     is_enabled: bool = True
