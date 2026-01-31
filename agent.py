@@ -257,6 +257,10 @@ class Agent(EventEmitter):
         if load_tools:
             self._load_external_tools()
 
+        # Tool context builder for intelligent tool selection
+        self._tool_context_builder = self._initialize_tool_context()
+        self._current_tool_selection = None  # Cached selection for current turn
+
     def register_sender(self, channel: str, sender):
         """Register a channel sender for outbound messages.
 
@@ -656,6 +660,62 @@ Work autonomously. Use tools as needed. When done, provide a brief summary of wh
         except ImportError:
             pass
 
+    def _initialize_tool_context(self):
+        """Initialize the tool context builder for intelligent tool selection.
+
+        The builder selects a subset of relevant tools for each API call instead
+        of sending all tools. This manages context window usage as the agent
+        creates more tools over time.
+
+        Returns:
+            ToolContextBuilder if memory is available, None otherwise.
+        """
+        if self.memory is None:
+            return None
+
+        try:
+            from memory.tool_context import create_tool_context_builder
+            return create_tool_context_builder(self.memory.store)
+        except ImportError:
+            return None
+        except Exception:
+            # Graceful degradation - continue without smart tool selection
+            return None
+
+    def _refresh_tool_selection(self, current_query: str = None, context: dict = None):
+        """Refresh the tool selection for the current turn.
+
+        Called before making API calls to select which tools to include.
+        Caches the selection in _current_tool_selection for use by
+        _tool_schemas() and _system_prompt().
+
+        Args:
+            current_query: The current user query for relevance matching.
+            context: Channel context with metadata.
+        """
+        if self._tool_context_builder is None:
+            self._current_tool_selection = None
+            return
+
+        # Extract topics from agent state if available
+        current_topics = None
+        if self.memory and hasattr(self.memory, 'store'):
+            try:
+                agent_state = self.memory.store.get_agent_state()
+                if agent_state:
+                    current_topics = agent_state.current_topics
+            except Exception:
+                pass
+
+        current_channel = context.get("channel") if context else None
+
+        self._current_tool_selection = self._tool_context_builder.select_tools(
+            all_tools=self.tools,
+            current_query=current_query,
+            current_topics=current_topics,
+            current_channel=current_channel,
+        )
+
     # -------------------------------------------------------------------------
     # Message Processing
     # -------------------------------------------------------------------------
@@ -727,6 +787,10 @@ Work autonomously. Use tools as needed. When done, provide a brief summary of wh
 
             thread = self.threads.setdefault(thread_id, [])
             thread.append({"role": "user", "content": user_input})
+
+            # Refresh tool selection for this turn
+            # This selects relevant tools based on query, context, and usage patterns
+            self._refresh_tool_selection(user_input, context)
 
             # Generate context-aware system prompt
             is_owner = context.get("is_owner", True)
@@ -906,6 +970,13 @@ SCHEDULE EXAMPLES:
 - "Send daily standup at 9am" → schedule add, spec="daily at 9:00"
 - "Run report on weekdays at 6pm EST" → schedule add, spec={{"kind":"cron","cron":"0 18 * * 1-5","tz":"America/New_York"}}"""
 
+        # Add tool inventory summary if available
+        tool_inventory = ""
+        if self._current_tool_selection is not None:
+            tool_inventory = f"\n\n{self._current_tool_selection.tool_inventory_summary}"
+
+        base_prompt = base_prompt + tool_inventory
+
         # Get verbose status
         verbose_level = console.get_verbose()
         verbose_info = f"- Verbose: {verbose_level.name.lower()} (use set_verbose tool to change)"
@@ -950,6 +1021,26 @@ You are responding to a message from {sender}, who is NOT your owner.
 - Use send_message to contact your owner if needed"""
 
     def _tool_schemas(self) -> list:
+        """Get tool schemas for API calls.
+
+        Uses intelligent selection when ToolContextBuilder is available,
+        otherwise returns all tools. The selection prioritizes:
+        1. Core tools (memory, objective, notes, schedule, etc.)
+        2. Most frequently used tools
+        3. Recently used tools
+        4. Tools relevant to current context
+
+        Returns:
+            List of tool schema dicts for the API call.
+        """
+        # Use smart selection if available
+        if self._current_tool_selection is not None:
+            return [
+                t.schema
+                for name, t in self.tools.items()
+                if name in self._current_tool_selection.selected_tools
+            ]
+        # Fallback: all tools
         return [t.schema for t in self.tools.values()]
 
     def _extract_text(self, response) -> str:
