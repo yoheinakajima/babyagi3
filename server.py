@@ -16,12 +16,30 @@ import os
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI, BackgroundTasks, Request, Header, HTTPException
+from fastapi import FastAPI, BackgroundTasks, Request, Header, HTTPException, Depends, Security
+from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
 
 from agent import Agent, Objective
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# API Key Authentication
+# =============================================================================
+
+API_KEY_HEADER = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+
+def require_api_key(api_key: str = Security(API_KEY_HEADER)) -> str:
+    """Verify the API key is valid. Returns the key if valid, raises 401 otherwise."""
+    expected = os.environ.get("AGENT_API_KEY")
+    if not expected:
+        raise HTTPException(status_code=500, detail="Server API key not configured")
+    if not api_key or api_key != expected:
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
+    return api_key
 
 
 # =============================================================================
@@ -55,7 +73,7 @@ async def lifespan(app: FastAPI):
     global scheduler_task
     _register_server_senders()
     scheduler_task = asyncio.create_task(agent.run_scheduler())
-    logger.info("Server started with SendBlue webhook at /webhooks/sendblue")
+    logger.info("Server started with SendBlue webhook at /webhooks/sendblue/{secret}")
     yield
     if scheduler_task:
         scheduler_task.cancel()
@@ -123,7 +141,11 @@ class SendBlueWebhookPayload(BaseModel):
 # =============================================================================
 
 @app.post("/message", response_model=MessageResponse)
-async def receive_message(req: MessageRequest, background_tasks: BackgroundTasks):
+async def receive_message(
+    req: MessageRequest,
+    background_tasks: BackgroundTasks,
+    _: str = Depends(require_api_key),
+):
     """
     Receive a message and process it.
 
@@ -143,7 +165,7 @@ async def receive_message(req: MessageRequest, background_tasks: BackgroundTasks
 
 
 @app.get("/objectives")
-async def list_objectives() -> list[ObjectiveResponse]:
+async def list_objectives(_: str = Depends(require_api_key)) -> list[ObjectiveResponse]:
     """List all objectives and their status."""
     return [
         ObjectiveResponse(
@@ -159,7 +181,7 @@ async def list_objectives() -> list[ObjectiveResponse]:
 
 
 @app.get("/objectives/{objective_id}")
-async def get_objective(objective_id: str) -> ObjectiveResponse:
+async def get_objective(objective_id: str, _: str = Depends(require_api_key)) -> ObjectiveResponse:
     """Get details of a specific objective."""
     obj = agent.objectives.get(objective_id)
     if not obj:
@@ -177,20 +199,20 @@ async def get_objective(objective_id: str) -> ObjectiveResponse:
 
 
 @app.get("/threads/{thread_id}")
-async def get_thread(thread_id: str):
+async def get_thread(thread_id: str, _: str = Depends(require_api_key)):
     """Get message history for a thread."""
     return {"thread_id": thread_id, "messages": agent.get_thread(thread_id)}
 
 
 @app.delete("/threads/{thread_id}")
-async def clear_thread(thread_id: str):
+async def clear_thread(thread_id: str, _: str = Depends(require_api_key)):
     """Clear a thread's message history."""
     agent.clear_thread(thread_id)
     return {"cleared": thread_id}
 
 
 @app.get("/health")
-async def health():
+async def health(_: str = Depends(require_api_key)):
     """Health check endpoint."""
     return {
         "status": "ok",
@@ -221,8 +243,9 @@ def _normalize_phone(phone: str) -> str:
     return cleaned.lower()
 
 
-@app.post("/webhooks/sendblue")
+@app.post("/webhooks/sendblue/{webhook_secret}")
 async def sendblue_webhook(
+    webhook_secret: str,
     payload: SendBlueWebhookPayload,
     background_tasks: BackgroundTasks,
     request: Request,
@@ -231,10 +254,16 @@ async def sendblue_webhook(
     Receive inbound SMS/iMessage from SendBlue.
 
     Configure this URL in your SendBlue dashboard:
-    https://your-domain.com/webhooks/sendblue
+    https://your-domain.com/webhooks/sendblue/YOUR_SECRET_HERE
+
+    Generate a secret with: python -c "import secrets; print(secrets.token_urlsafe(32))"
 
     SendBlue will POST to this endpoint when messages are received.
     """
+    # Verify webhook secret
+    expected_secret = os.environ.get("SENDBLUE_WEBHOOK_SECRET")
+    if not expected_secret or webhook_secret != expected_secret:
+        raise HTTPException(status_code=404)  # 404 to not reveal endpoint exists
     global _sendblue_processed_ids
 
     # Log the incoming webhook

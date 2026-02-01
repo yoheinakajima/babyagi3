@@ -2027,6 +2027,13 @@ def _register_tool_tool(agent: Agent) -> Tool:
     """Register new tools at runtime with e2b sandbox for external packages."""
 
     def fn(params: dict, ag: Agent) -> dict:
+        # Security: Only owner can register new tools
+        if not ag._current_context.get("is_owner", False):
+            return {
+                "error": "Permission denied",
+                "reason": "Only the owner can register new tools"
+            }
+
         code = params["code"]
         tool_var_name = params["tool_var_name"]
 
