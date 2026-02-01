@@ -57,3 +57,28 @@ channels:
 agent:
   model: "claude-sonnet-4-20250514"
   # model: "claude-opus-4-20250514"  # For more complex tasks
+
+  # Agent identity
+  name: "${AGENT_NAME:Assistant}"
+  description: "${AGENT_DESCRIPTION:a helpful AI assistant}"
+  objective: "${AGENT_OBJECTIVE:Help my owner with tasks, manage their digital presence, and handle communications on their behalf.}"
+
+  # Behavior settings
+  behavior:
+    # Spending controls
+    spending:
+      require_approval: true  # Require owner approval for purchases
+      auto_approve_limit: 0.0  # Auto-approve purchases under this amount (USD)
+
+    # External communication policy
+    external_policy:
+      respond_to_unknown: true  # Respond to emails from unknown senders
+      consult_owner_threshold: "medium"  # low, medium, high - when to consult owner
+      # low: consult for any non-trivial request
+      # medium: consult for requests involving money, data, or commitments
+      # high: only consult for major decisions
+
+    # Account creation behavior
+    accounts:
+      use_agent_email: true  # Always use agent's email for signups
+      check_existing_first: true  # Check for existing accounts before creating new ones

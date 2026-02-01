@@ -80,7 +80,30 @@ def _default_config() -> dict:
                 "poll_interval": 60,
             },
             "voice": {"enabled": False},
-        }
+        },
+        "agent": {
+            "model": "claude-sonnet-4-20250514",
+            "name": os.environ.get("AGENT_NAME", "Assistant"),
+            "description": os.environ.get("AGENT_DESCRIPTION", "a helpful AI assistant"),
+            "objective": os.environ.get(
+                "AGENT_OBJECTIVE",
+                "Help my owner with tasks, manage their digital presence, and handle communications on their behalf."
+            ),
+            "behavior": {
+                "spending": {
+                    "require_approval": True,
+                    "auto_approve_limit": 0.0,
+                },
+                "external_policy": {
+                    "respond_to_unknown": True,
+                    "consult_owner_threshold": "medium",
+                },
+                "accounts": {
+                    "use_agent_email": True,
+                    "check_existing_first": True,
+                },
+            },
+        },
     }
 
 
