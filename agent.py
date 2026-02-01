@@ -1329,6 +1329,17 @@ SCHEDULE EXAMPLES:
         external_policy = behavior.get("external_policy", {})
         consult_threshold = external_policy.get("consult_owner_threshold", "medium")
 
+        # Build channel-specific formatting rules
+        formatting_rules = ""
+        if channel in ("sendblue", "email"):
+            formatting_rules = """
+
+MESSAGE FORMATTING:
+- Do NOT use markdown formatting (no **, *, #, `, ```, -, [], () link syntax, etc.)
+- Write in plain text only - these channels do not render markdown
+- Use natural language emphasis instead of formatting (e.g., say "important" rather than **important**)
+- For lists, use simple numbering (1. 2. 3.) or write items in prose"""
+
         if is_owner:
             return f"""
 
@@ -1336,7 +1347,7 @@ CURRENT CONTEXT:
 - Channel: {channel}
 - Thread: {thread_id}
 {verbose_info}
-- Speaking with: Owner (full access)
+- Speaking with: Owner (full access){formatting_rules}
 
 You are speaking with your owner. You have full access to:
 - Shared memory across all conversations
@@ -1371,7 +1382,7 @@ CURRENT CONTEXT:
 - Channel: {channel}
 - Thread: {thread_id}
 {verbose_info}
-- Speaking with: {sender} (external - NOT your owner)
+- Speaking with: {sender} (external - NOT your owner){formatting_rules}
 
 You are responding to a message from {sender}, who is NOT your owner.
 
