@@ -5,12 +5,19 @@ This module provides utilities to:
 1. Hook memory logging into the agent event system
 2. Provide memory context to the system prompt
 3. Create memory-enhanced tools
+4. Extract learnings from feedback and self-evaluation (self-improvement)
 """
 
 import asyncio
 from datetime import datetime
 
 from .models import Event
+from .learning import (
+    FeedbackExtractor,
+    ObjectiveEvaluator,
+    PreferenceSummarizer,
+    ensure_user_preferences_node,
+)
 
 
 def setup_memory_hooks(agent, memory):
@@ -206,6 +213,120 @@ def setup_memory_hooks(agent, memory):
             task_id=event["id"],
             is_owner=True,
         )
+
+    # ═══════════════════════════════════════════════════════════
+    # SELF-IMPROVEMENT HOOKS
+    # ═══════════════════════════════════════════════════════════
+
+    # Ensure user_preferences node exists
+    try:
+        ensure_user_preferences_node(memory.store)
+    except Exception:
+        pass  # Non-critical
+
+    @agent.on("objective_end")
+    def on_objective_end_evaluate(event):
+        """Evaluate completed objectives for learnings (self-improvement)."""
+        if event.get("status") not in ["completed", "failed"]:
+            return
+
+        async def do_evaluate():
+            try:
+                # Get events from this objective
+                objective_events = memory.store.get_recent_events(
+                    limit=50,
+                    task_id=event["id"]
+                )
+
+                if len(objective_events) < 3:
+                    return  # Too short to evaluate
+
+                evaluator = ObjectiveEvaluator()
+                learnings = await evaluator.evaluate(
+                    objective_id=event["id"],
+                    goal=event.get("goal", ""),
+                    status=event["status"],
+                    result=event.get("result", event.get("error", "")),
+                    events=objective_events
+                )
+
+                for learning in learnings:
+                    memory.store.create_learning(learning)
+
+                # Trigger preference summary update if learnings were generated
+                if learnings:
+                    memory.store.increment_staleness("user_preferences")
+
+            except Exception as e:
+                print(f"Objective evaluation error: {e}")
+
+        # Run evaluation asynchronously to not block
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(do_evaluate())
+        except RuntimeError:
+            # No event loop running, skip async evaluation
+            pass
+
+
+def setup_feedback_extraction(agent, memory):
+    """
+    Set up feedback extraction from owner messages.
+
+    This should be called separately as it requires async processing.
+    Call this after setup_memory_hooks if you want automatic feedback extraction.
+    """
+
+    async def extract_feedback_from_message(event: Event):
+        """Extract feedback from an owner message."""
+        if not event.is_owner:
+            return
+
+        try:
+            # Get recent AI actions for context
+            recent = memory.store.get_recent_events(
+                limit=10,
+            )
+            # Filter to outbound/internal only
+            recent = [e for e in recent if e.direction != "inbound"][:5]
+
+            extractor = FeedbackExtractor()
+            learning = await extractor.extract(event, recent)
+
+            if learning:
+                memory.store.create_learning(learning)
+                # Trigger preference summary update
+                memory.store.increment_staleness("user_preferences")
+                print(f"Extracted learning from feedback: {learning.content[:50]}...")
+
+        except Exception as e:
+            print(f"Feedback extraction error: {e}")
+
+    return extract_feedback_from_message
+
+
+async def refresh_user_preferences(memory):
+    """
+    Manually refresh the user preferences summary.
+
+    Call this periodically or after significant new learnings.
+    """
+    try:
+        summarizer = PreferenceSummarizer()
+        new_summary = await summarizer.refresh_preferences(memory.store)
+
+        # Update the summary node
+        prefs_node = memory.store.get_summary_node("user_preferences")
+        if prefs_node:
+            prefs_node.summary = new_summary
+            prefs_node.events_since_update = 0
+            memory.store.update_summary_node(prefs_node)
+
+        return new_summary
+
+    except Exception as e:
+        print(f"Preference refresh error: {e}")
+        return None
 
 
 def log_message(memory, content: str, context: dict, direction: str = "inbound") -> Event:
@@ -468,11 +589,113 @@ def create_enhanced_memory_tool(memory):
             except Exception as e:
                 return {"error": f"Could not get tool: {e}"}
 
+        # ═══════════════════════════════════════════════════════════
+        # LEARNING ACTIONS (Self-Improvement)
+        # ═══════════════════════════════════════════════════════════
+
+        elif action == "list_learnings":
+            # List recent learnings
+            try:
+                tool_filter = params.get("tool_name")
+                sentiment_filter = params.get("sentiment")
+                limit = params.get("limit", 20)
+
+                learnings = memory.store.find_learnings(
+                    tool_id=tool_filter,
+                    sentiment=sentiment_filter,
+                    limit=limit,
+                )
+                return {
+                    "learnings": [
+                        {
+                            "id": l.id,
+                            "content": l.content[:200],
+                            "source_type": l.source_type,
+                            "sentiment": l.sentiment,
+                            "tool_id": l.tool_id,
+                            "objective_type": l.objective_type,
+                            "recommendation": l.recommendation,
+                            "times_applied": l.times_applied,
+                            "created_at": l.created_at.isoformat() if l.created_at else None,
+                        }
+                        for l in learnings
+                    ]
+                }
+            except Exception as e:
+                return {"error": f"Could not list learnings: {e}"}
+
+        elif action == "learning_stats":
+            # Get aggregate learning statistics
+            try:
+                stats = memory.store.get_learning_stats()
+                return {"stats": stats}
+            except Exception as e:
+                return {"error": f"Could not get learning stats: {e}"}
+
+        elif action == "get_preferences":
+            # Get current user preferences summary
+            try:
+                prefs_node = memory.store.get_summary_node("user_preferences")
+                if prefs_node:
+                    return {
+                        "preferences": prefs_node.summary,
+                        "last_updated": prefs_node.summary_updated_at.isoformat() if prefs_node.summary_updated_at else None,
+                        "events_since_update": prefs_node.events_since_update,
+                    }
+                return {"preferences": "No preferences recorded yet."}
+            except Exception as e:
+                return {"error": f"Could not get preferences: {e}"}
+
+        elif action == "search_learnings":
+            # Semantic search over learnings
+            query = params.get("query", "")
+            if not query:
+                return {"error": "Query required for learning search"}
+            try:
+                from .embeddings import get_embedding
+                embedding = get_embedding(query)
+                learnings = memory.store.search_learnings(
+                    embedding=embedding,
+                    tool_id=params.get("tool_name"),
+                    limit=params.get("limit", 10),
+                )
+                return {
+                    "learnings": [
+                        {
+                            "content": l.content[:200],
+                            "sentiment": l.sentiment,
+                            "tool_id": l.tool_id,
+                            "recommendation": l.recommendation,
+                        }
+                        for l in learnings
+                    ]
+                }
+            except Exception as e:
+                return {"error": f"Could not search learnings: {e}"}
+
+        elif action == "refresh_preferences":
+            # Trigger preferences summary refresh
+            try:
+                async def do_refresh():
+                    return await refresh_user_preferences(memory)
+
+                try:
+                    loop = asyncio.get_running_loop()
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor() as pool:
+                        result = pool.submit(asyncio.run, do_refresh()).result()
+                    return {"refreshed": True, "preferences": result}
+                except RuntimeError:
+                    result = asyncio.run(do_refresh())
+                    return {"refreshed": True, "preferences": result}
+            except Exception as e:
+                return {"error": f"Could not refresh preferences: {e}"}
+
         return {"error": f"Unknown action: {action}"}
 
     return Tool(
         name="memory",
-        description="""Enhanced memory system with semantic search, graph storage, and tool management.
+        description="""Enhanced memory system with semantic search, graph storage, tool management, and self-improvement.
 
 Memory Actions:
 - store: Store a fact or observation (content)
@@ -484,34 +707,43 @@ Memory Actions:
 - get_context: Get current assembled context
 - deep_search: Thorough agentic search for complex queries (query)
 
-Tool Management Actions (self-improvement):
+Tool Management Actions:
 - list_tools: List all tools I've created with their status and health
 - tool_stats: Get aggregate statistics about tool usage and success rates
 - problematic_tools: Find tools with high error rates (optional threshold)
 - get_tool: Get detailed info about a specific tool (tool_name)
+
+Self-Improvement Actions (learnings from feedback and evaluation):
+- list_learnings: List learnings (optional: tool_name, sentiment filter)
+- learning_stats: Get aggregate statistics about learnings
+- get_preferences: Get current user preferences summary
+- search_learnings: Semantic search over learnings (query)
+- refresh_preferences: Manually refresh the preferences summary
 
 Examples:
 - memory(action="store", content="John works at Acme Corp")
 - memory(action="search", query="fundraising discussions")
 - memory(action="find_entity", query="venture capital", type="person")
 - memory(action="list_tools")
-- memory(action="tool_stats")
-- memory(action="get_tool", tool_name="my_custom_tool")
-- memory(action="problematic_tools", threshold=3)""",
+- memory(action="list_learnings", sentiment="negative")
+- memory(action="get_preferences")
+- memory(action="search_learnings", query="email formatting")""",
         parameters={
             "type": "object",
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["store", "search", "list", "find_entity", "find_relationship", "get_summary", "get_context", "deep_search", "list_tools", "tool_stats", "problematic_tools", "get_tool"],
+                    "enum": ["store", "search", "list", "find_entity", "find_relationship", "get_summary", "get_context", "deep_search", "list_tools", "tool_stats", "problematic_tools", "get_tool", "list_learnings", "learning_stats", "get_preferences", "search_learnings", "refresh_preferences"],
                 },
                 "content": {"type": "string", "description": "Content to store"},
                 "query": {"type": "string", "description": "Search query"},
                 "key": {"type": "string", "description": "Summary node key"},
                 "type": {"type": "string", "description": "Entity type filter"},
                 "entity_id": {"type": "string", "description": "Entity ID for relationship search"},
-                "tool_name": {"type": "string", "description": "Tool name for get_tool action"},
+                "tool_name": {"type": "string", "description": "Tool name for filtering"},
                 "threshold": {"type": "integer", "description": "Error threshold for problematic_tools"},
+                "sentiment": {"type": "string", "enum": ["positive", "negative", "neutral"], "description": "Sentiment filter for learnings"},
+                "limit": {"type": "integer", "description": "Max results to return"},
             },
             "required": ["action"],
         },

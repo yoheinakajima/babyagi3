@@ -32,6 +32,8 @@ class ContextConfig:
             "task": 400,
             "counterparty": 400,
             "topics": 400,
+            "user_preferences": 300,  # Self-improvement: user preferences summary
+            "learnings": 200,  # Self-improvement: context-specific learnings
         }
     )
 
@@ -187,6 +189,20 @@ def assemble_context(
         )
         if ctx.topics:
             metrics["sections_included"].append("topics")
+
+    # ═══════════════════════════════════════════════════════════
+    # SELF-IMPROVEMENT (learnings and preferences)
+    # ═══════════════════════════════════════════════════════════
+
+    # User preferences (always included if available)
+    ctx.user_preferences = _build_user_preferences(store, config, metrics)
+    if ctx.user_preferences:
+        metrics["sections_included"].append("user_preferences")
+
+    # Context-specific learnings
+    ctx.learnings = _build_learnings_context(event, store, config, metrics)
+    if ctx.learnings:
+        metrics["sections_included"].append("learnings")
 
     # ═══════════════════════════════════════════════════════════
     # FINALIZE METRICS
@@ -537,6 +553,83 @@ def _build_topics_context(
         str(topics), config.chars_per_token
     )
     return topics
+
+
+def _build_user_preferences(
+    store, config: ContextConfig, metrics: dict
+) -> str:
+    """Build user preferences context (always included if available)."""
+    budget = config.token_budgets.get("user_preferences", 300)
+
+    # Get user_preferences summary node
+    prefs_node = store.get_summary_node("user_preferences")
+    if not prefs_node or not prefs_node.summary:
+        return ""
+
+    # Skip if it's just the default message
+    if prefs_node.summary == "No user preferences recorded yet.":
+        return ""
+
+    result = _truncate_to_budget(prefs_node.summary, budget, config.chars_per_token)
+
+    metrics["tokens_by_section"]["user_preferences"] = _estimate_tokens(
+        result, config.chars_per_token
+    )
+    return result
+
+
+def _build_learnings_context(
+    event: Event | None, store, config: ContextConfig, metrics: dict
+) -> list[dict]:
+    """Build context-specific learnings based on current event."""
+    budget = config.token_budgets.get("learnings", 200)
+    learnings = []
+
+    if not event:
+        return []
+
+    try:
+        # Import here to avoid circular imports
+        from .learning import LearningRetriever
+
+        retriever = LearningRetriever(store)
+
+        # If using a specific tool, get tool-specific learnings
+        if event.tool_id:
+            tool_learnings = retriever.get_for_tool(event.tool_id, limit=3)
+            for l in tool_learnings:
+                learnings.append({
+                    "type": "tool",
+                    "tool": event.tool_id,
+                    "learning": l.content[:200],
+                    "recommendation": l.recommendation[:100] if l.recommendation else None,
+                })
+
+        # If this looks like an objective start, get similar objective learnings
+        if event.event_type in ["objective_start", "task_created"]:
+            obj_learnings = retriever.get_for_objective(event.content, limit=3)
+            for l in obj_learnings:
+                # Avoid duplicates from tool learnings
+                if l.tool_id and event.tool_id and l.tool_id == event.tool_id:
+                    continue
+                learnings.append({
+                    "type": "objective",
+                    "learning": l.content[:200],
+                    "recommendation": l.recommendation[:100] if l.recommendation else None,
+                })
+
+    except Exception as e:
+        # Don't fail context assembly if learnings fail
+        print(f"Error building learnings context: {e}")
+
+    # Limit total learnings to fit budget
+    max_learnings = budget // 50  # Rough estimate of tokens per learning
+    learnings = learnings[:max_learnings]
+
+    metrics["tokens_by_section"]["learnings"] = _estimate_tokens(
+        str(learnings), config.chars_per_token
+    )
+    return learnings
 
 
 def format_context_for_prompt(ctx: AssembledContext) -> str:
