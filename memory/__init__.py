@@ -37,6 +37,8 @@ from .models import (
     AgentState,
     ToolRecord,
     EventTopic,
+    Learning,
+    ExtractedFeedback,
 )
 from .store import MemoryStore
 from .context import assemble_context
@@ -44,6 +46,13 @@ from .retrieval import QuickRetrieval, DeepRetrievalAgent
 from .extraction import ExtractionPipeline
 from .summaries import SummaryManager
 from .embeddings import get_embedding, get_embeddings
+from .learning import (
+    FeedbackExtractor,
+    ObjectiveEvaluator,
+    LearningRetriever,
+    PreferenceSummarizer,
+    ensure_user_preferences_node,
+)
 
 __all__ = [
     # Models
@@ -56,6 +65,8 @@ __all__ = [
     "AgentState",
     "ToolRecord",
     "EventTopic",
+    "Learning",
+    "ExtractedFeedback",
     # Core
     "MemoryStore",
     "assemble_context",
@@ -63,6 +74,12 @@ __all__ = [
     "DeepRetrievalAgent",
     "ExtractionPipeline",
     "SummaryManager",
+    # Self-Improvement
+    "FeedbackExtractor",
+    "ObjectiveEvaluator",
+    "LearningRetriever",
+    "PreferenceSummarizer",
+    "ensure_user_preferences_node",
     # Utilities
     "get_embedding",
     "get_embeddings",
@@ -224,3 +241,36 @@ class Memory:
     def update_agent_state(self, **updates) -> AgentState:
         """Update the agent state."""
         return self.store.update_agent_state(**updates)
+
+    # ═══════════════════════════════════════════════════════════
+    # SELF-IMPROVEMENT (Learnings)
+    # ═══════════════════════════════════════════════════════════
+
+    def get_learnings(
+        self,
+        tool_id: str = None,
+        objective_type: str = None,
+        sentiment: str = None,
+        limit: int = 20,
+    ) -> list[Learning]:
+        """Get learnings, optionally filtered."""
+        return self.store.find_learnings(
+            tool_id=tool_id,
+            objective_type=objective_type,
+            sentiment=sentiment,
+            limit=limit,
+        )
+
+    def search_learnings(self, query: str, limit: int = 10) -> list[Learning]:
+        """Semantic search over learnings."""
+        embedding = get_embedding(query)
+        return self.store.search_learnings(embedding=embedding, limit=limit)
+
+    def get_user_preferences(self) -> str:
+        """Get the current user preferences summary."""
+        retriever = LearningRetriever(self.store)
+        return retriever.get_user_preferences()
+
+    def get_learning_stats(self) -> dict:
+        """Get statistics about learnings."""
+        return self.store.get_learning_stats()
