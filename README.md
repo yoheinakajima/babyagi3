@@ -17,37 +17,27 @@ Channel input     → message
 
 This means the entire system reduces to: **a loop that processes messages and decides what to do next.**
 
-## What's New in v0.3.2
+## What's New in v0.3.0
 
+- **Graph-Based Memory** — SQLite-backed persistent memory with entity extraction, relationship tracking, and semantic search
+- **Smart Tool Selection** — Intelligent context-aware tool filtering to manage growing tool inventories
+- **Tool Self-Improvement** — Dynamically created tools persist across restarts with usage statistics and health tracking
 - **Objective Concurrency Control** — Max 5 concurrent objectives with semaphore-based limiting
 - **Priority Queue** — Objectives support priority 1-10 (lower = higher); higher priority runs first
 - **Retry with Backoff** — Failed objectives retry automatically with exponential backoff (2s, 4s, 8s)
 - **Budget Controls** — Set `budget_usd` or `token_limit` per objective to cap costs
 - **True Cancellation** — Cancel signals propagate to running objectives immediately
-- **Enhanced Events** — New `objective_retry` and `objective_usage` events for observability
+- **Metrics & Cost Tracking** — Automatic tracking of API usage, costs, and tool performance
+- **Thread Repair** — Automatic repair of corrupted message threads from failed tool executions
 
-### Previous (v0.3.1)
+### Previous (v0.2.0)
 
 - **Skills System** — Learn new behaviors from SKILL.md files with safety scanning
 - **Composio Integration** — Connect to 250+ apps (Slack, GitHub, Notion) via OAuth
-- **Workflow Tools** — Combine skills and tools into reusable multi-step workflows
-- **Three Tool Types** — Executable (Python), Skills (behavioral), and Composio (external apps)
-- **Dependency Tracking** — Tools can declare dependencies on other tools and skills
-
-### Previous (v0.3.0)
-
 - **Multi-Channel Architecture** — Receive messages from CLI, email, voice, and more
 - **Full-Featured Scheduler** — Cron expressions, intervals, one-time tasks with persistence
 - **Styled CLI Output** — Color-coded messages (user/agent/system) with verbose modes
 - **Event System** — UI-ready event emitter for tool calls, objectives, and tasks
-- **Unified Communication** — Send messages via any channel with `send_message` tool
-- **Owner vs External** — Context-aware responses based on message source
-- **YAML Configuration** — Easy channel setup with environment variable substitution
-- **Tool Health System** — Automatic detection of available tools and missing dependencies
-- **Extensible Channels** — Add new channels by implementing simple listener/sender patterns
-
-### Previous (v0.2.0)
-
 - **Background Objectives** — Async work that runs while chat continues
 - **e2b Sandbox** — Safe code execution for dynamically created tools
 - **External Tools** — Web search, browser automation, email, secrets management
@@ -422,16 +412,17 @@ agent.run("Summarize what you know about our cloud infrastructure")
 
 **Actions:**
 - `store` — Save content to memory with timestamp
-- `search` — Find memories by keyword (returns last 10 matches)
+- `search` — Semantic search over memories (returns last 10 matches)
 - `list` — Show recent memories (last 20)
 - `find_entity` — Search entities in the knowledge graph (type: person/org/concept)
 - `find_relationship` — Find connections between entities
-- `get_summary` — Get summary of a topic from memory
-- `get_context` — Get full context for the current conversation
-- `deep_search` — Cross-reference search across events, entities, and topics
-- `list_tools` — List all registered tools with usage stats
-- `tool_stats` — Get detailed statistics for a specific tool
+- `get_summary` — Get pre-computed summary by key (e.g., 'root', 'entity:uuid')
+- `get_context` — Get assembled context for the current conversation
+- `deep_search` — Thorough agentic search for complex queries
+- `list_tools` — List all registered tools with usage stats and health status
+- `tool_stats` — Get aggregate statistics about tool usage
 - `problematic_tools` — Find tools with high error rates
+- `get_tool` — Get detailed info about a specific tool (tool_name)
 
 **Convenience Methods (for dynamic tools):**
 
@@ -798,6 +789,30 @@ channels:
 agent:
   model: "claude-sonnet-4-20250514"
   # model: "claude-opus-4-20250514"  # For more complex tasks
+
+  # Agent identity
+  name: "${AGENT_NAME:Assistant}"
+  description: "${AGENT_DESCRIPTION:a helpful AI assistant}"
+  objective: "Help my owner with tasks..."
+
+  # Behavior settings
+  behavior:
+    spending:
+      require_approval: true
+      auto_approve_limit: 0.0  # USD
+    external_policy:
+      respond_to_unknown: true
+      consult_owner_threshold: "medium"  # low, medium, high
+    accounts:
+      use_agent_email: true
+      check_existing_first: true
+
+# Memory configuration (optional)
+memory:
+  enabled: true  # Set to false to disable persistent memory
+  path: "~/.babyagi/memory"  # SQLite database location
+  background_extraction: true  # Extract entities/relationships in background
+  extraction_interval: 60  # Seconds between extraction runs
 ```
 
 ### Environment Variables
@@ -959,12 +974,16 @@ The agent emits events for all key operations, making it easy to build UIs or lo
 **Available Events:**
 - `tool_start` — Tool execution starting: `{name, input}`
 - `tool_end` — Tool execution completed: `{name, result, duration_ms}`
+- `tool_registered` — New tool registered: `{name, description, parameters, source_code}`
+- `tool_disabled` — Tool disabled: `{name, reason}`
 - `objective_start` — Background objective starting: `{id, goal, priority, attempt}`
 - `objective_end` — Background objective completed: `{id, status, result, spent_usd, tokens_used}`
 - `objective_retry` — Objective retrying after failure: `{id, attempt, max_retries, delay_seconds, error}`
 - `objective_usage` — Token/cost update for objective: `{id, input_tokens, output_tokens, cost_usd, total_spent_usd, total_tokens_used}`
 - `task_start` — Scheduled task starting: `{id, name, goal}`
 - `task_end` — Scheduled task completed: `{id, status, duration_ms}`
+- `thread_repaired` — Corrupted thread auto-repaired: `{thread_id, repaired}`
+- `agent_response` — Agent finished generating response
 
 **Example: WebSocket UI**
 
@@ -1153,13 +1172,13 @@ summary = get_health_summary()
 
 ### The Entire System
 
-~300 lines of core code. Everything else is tools and channels.
+~300 lines of core code. Everything else is tools, memory, and channels.
 
 ```
 agent.py
 ├── Tool class (tool definition with health checks)
 ├── Agent class (main loop + channel support + EventEmitter)
-├── Objective class (background work)
+├── Objective class (background work with priority/budget)
 ├── Core tools (memory, objectives, notes, schedule, register, send_message)
 ├── Skill/Composio loading (three tool types on startup)
 └── Sender registration
@@ -1170,14 +1189,35 @@ scheduler.py
 ├── SchedulerStore class (JSON persistence)
 └── Scheduler class (execution engine)
 
+memory/
+├── __init__.py (Memory facade)
+├── store.py (SQLite backend with vector search)
+├── models.py (Event, Entity, Edge, Topic, etc.)
+├── extraction.py (NLP entity/relationship extraction)
+├── summaries.py (Hierarchical summary management)
+├── context.py (Context assembly for prompts)
+├── retrieval.py (Quick and deep retrieval)
+├── embeddings.py (OpenAI embeddings with caching)
+├── integration.py (Agent hooks and enhanced memory tool)
+└── tool_context.py (Intelligent tool selection)
+
+metrics/
+├── __init__.py
+├── clients.py (Instrumented API client)
+├── costs.py (Token cost calculation)
+├── collector.py (Metrics aggregation)
+└── models.py (Metric data models)
+
 utils/
 ├── __init__.py
-├── events.py (EventEmitter mixin for decoupled event handling)
-└── console.py (styled terminal output with verbose levels)
+├── events.py (EventEmitter mixin)
+├── console.py (styled terminal output)
+├── collections.py (ThreadSafeList)
+└── email_client.py (Email utilities)
 
 listeners/
 ├── __init__.py
-├── cli.py (terminal input + event subscriptions for verbose output)
+├── cli.py (terminal input + verbose output)
 ├── email.py (inbox polling)
 └── voice.py (speech input)
 
@@ -1192,7 +1232,10 @@ tools/
 ├── skills.py (skills, Composio, workflows)
 ├── web.py (search, browse, fetch)
 ├── email.py (AgentMail tools)
-└── secrets.py (secure key storage)
+├── secrets.py (secure key storage)
+├── credentials.py (credential management)
+├── metrics.py (cost tracking tools)
+└── verbose.py (verbosity control)
 
 config.py (YAML loader with env substitution)
 config.yaml (channel configuration)
@@ -1297,15 +1340,23 @@ Wait for the verification email and complete the signup.
 
 ## On "Organized Memory"
 
-The memory system balances simplicity with power:
+The memory system uses a three-layer architecture:
 
-1. **Append-only event log** — Every interaction is immutable, timestamped
-2. **Automatic entity extraction** — People, organizations, and concepts are extracted into a knowledge graph
-3. **Relationship tracking** — Connections between entities are discovered and stored
-4. **Hierarchical summaries** — Automatic summarization at multiple levels (recent, daily, weekly)
-5. **Context assembly** — Smart context building for each conversation turn
+1. **Raw Event Log** — Every interaction stored immutably in SQLite with timestamps
+2. **Extracted Knowledge Graph** — Entities (people, orgs, concepts), relationships, and topics extracted via LLM
+3. **Hierarchical Summaries** — Pre-computed summaries at multiple levels for fast context assembly
+
+**Key Features:**
+
+- **Semantic Search** — Vector embeddings (OpenAI text-embedding-3-small) enable meaning-based retrieval
+- **Entity Extraction** — Background process identifies people, organizations, concepts from events
+- **Relationship Discovery** — Connections between entities tracked (e.g., "John works_at Acme")
+- **Topic Tracking** — Conversations categorized by topic for better organization
+- **Context Assembly** — Smart context building pulls relevant history, summaries, and entities
 
 **The LLM is still the organizer.** The knowledge graph provides structure, but the LLM synthesizes meaning.
+
+**Storage Location:** `~/.babyagi/memory/memory.db` (configurable via `memory.path` in config.yaml)
 
 **Thread Repair:**
 
@@ -1321,9 +1372,10 @@ result = agent.repair_thread("main")
 **Graceful Degradation:**
 
 Memory features degrade gracefully:
-- If SQLite is unavailable, falls back to in-memory storage
+- If SQLite is unavailable, falls back to in-memory storage (session only)
 - If entity extraction fails, events are still logged
 - If summarization fails, raw events are still searchable
+- If embeddings API unavailable, keyword search still works
 
 ## API Reference
 
@@ -1337,8 +1389,18 @@ class Agent(EventEmitter):
         load_tools: bool = True,
         config: dict = None  # Channel/owner configuration
     )
-    def register(self, tool: Tool | ToolLike) -> None
+
+    # Properties
+    memory: Memory | None  # SQLite memory system (None if disabled)
+    scheduler: Scheduler   # Task scheduler
+    tools: dict[str, Tool] # Registered tools
+    senders: dict[str, Sender]  # Channel senders
+
+    # Tool registration
+    def register(self, tool: Tool | ToolLike, emit_event: bool = False) -> None
     def register_sender(self, channel: str, sender: Sender) -> None
+
+    # Message processing
     def run(self, user_input: str, thread_id: str = "main") -> str
     async def run_async(
         self,
@@ -1347,6 +1409,7 @@ class Agent(EventEmitter):
         context: dict = None  # Channel context (is_owner, sender, channel)
     ) -> str
     async def run_scheduler(self) -> None  # Start the scheduler loop
+    async def run_objective(self, objective_id: str) -> None  # Run objective
 
     # Thread management
     def get_thread(self, thread_id: str = "main") -> list
@@ -1536,6 +1599,7 @@ keyrings-cryptfile >= 1.3.9
 ddgs >= 9.10.0
 croniter >= 2.0.0
 pyyaml >= 6.0
+composio-core >= 0.7.21
 ```
 
 ### Optional (for voice channel)

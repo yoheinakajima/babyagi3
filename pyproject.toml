@@ -1,6 +1,6 @@
 [project]
 name = "babyagi"
-version = "0.2.2"
+version = "0.3.0"
 description = "Minimal agent with background objectives and recurring tasks"
 requires-python = ">=3.12"
 dependencies = [
