@@ -21,7 +21,11 @@ from .models import (
     Entity,
     Event,
     EventTopic,
+    ExtractionCall,
+    Fact,
     Learning,
+    RetrievalQuery,
+    RetrievalResult,
     SummaryNode,
     Task,
     ToolDefinition,
@@ -545,6 +549,150 @@ class MemoryStore:
         """
         )
 
+        # Facts table - unified triplet storage for all sources
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS facts (
+                id TEXT PRIMARY KEY,
+
+                -- Triplet Core
+                subject_entity_id TEXT NOT NULL,
+                predicate TEXT NOT NULL,
+                object_entity_id TEXT,
+                object_value TEXT,
+                object_type TEXT NOT NULL DEFAULT 'value',
+
+                -- Additional entities mentioned
+                mentioned_entity_ids TEXT,
+
+                -- Classification
+                fact_type TEXT DEFAULT 'relation',
+                predicate_type TEXT,
+
+                -- Human-readable (LLM-generated)
+                fact_text TEXT NOT NULL,
+                fact_embedding BLOB,
+
+                -- Provenance
+                source_type TEXT NOT NULL DEFAULT 'conversation',
+                source_id TEXT,
+                source_event_ids TEXT,
+
+                -- Confidence & Strength
+                confidence REAL DEFAULT 0.8,
+                strength REAL DEFAULT 0.5,
+
+                -- Temporality
+                valid_from TEXT,
+                valid_to TEXT,
+                is_current INTEGER DEFAULT 1,
+
+                -- Usage tracking
+                times_retrieved INTEGER DEFAULT 0,
+                times_used INTEGER DEFAULT 0,
+                last_used_at TEXT,
+
+                -- Timestamps
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+
+                FOREIGN KEY (subject_entity_id) REFERENCES entities(id),
+                FOREIGN KEY (object_entity_id) REFERENCES entities(id)
+            )
+        """
+        )
+
+        # Retrieval queries - for learning optimal retrieval strategies
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS retrieval_queries (
+                id TEXT PRIMARY KEY,
+
+                -- The query
+                query_text TEXT NOT NULL,
+                query_embedding BLOB,
+                query_type TEXT,
+
+                -- Strategy used
+                chain_strategy TEXT,
+
+                -- Outcome
+                total_results INTEGER DEFAULT 0,
+                results_used INTEGER DEFAULT 0,
+                was_successful INTEGER DEFAULT 0,
+
+                -- Performance
+                total_time_ms INTEGER DEFAULT 0,
+
+                -- Context
+                objective_id TEXT,
+                event_id TEXT,
+
+                created_at TEXT NOT NULL
+            )
+        """
+        )
+
+        # Retrieval results - individual results from queries
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS retrieval_results (
+                id TEXT PRIMARY KEY,
+                query_id TEXT NOT NULL,
+
+                -- What was found
+                result_type TEXT NOT NULL,
+                result_id TEXT NOT NULL,
+
+                -- How it was found
+                retrieval_method TEXT NOT NULL,
+                method_step INTEGER DEFAULT 1,
+
+                -- Relevance
+                similarity_score REAL,
+                rank_position INTEGER DEFAULT 0,
+
+                -- Usage
+                was_used INTEGER DEFAULT 0,
+
+                created_at TEXT NOT NULL,
+
+                FOREIGN KEY (query_id) REFERENCES retrieval_queries(id)
+            )
+        """
+        )
+
+        # Extraction calls - metrics for extraction LLM calls
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS extraction_calls (
+                id TEXT PRIMARY KEY,
+
+                -- Source
+                source_type TEXT NOT NULL,
+                source_id TEXT,
+                content_length INTEGER DEFAULT 0,
+
+                -- Results
+                entities_extracted INTEGER DEFAULT 0,
+                facts_extracted INTEGER DEFAULT 0,
+                topics_extracted INTEGER DEFAULT 0,
+
+                -- Cost tracking
+                model TEXT,
+                input_tokens INTEGER DEFAULT 0,
+                output_tokens INTEGER DEFAULT 0,
+                cost_usd REAL DEFAULT 0.0,
+                duration_ms INTEGER DEFAULT 0,
+
+                -- Timing decision
+                timing_mode TEXT DEFAULT 'immediate',
+
+                created_at TEXT NOT NULL
+            )
+        """
+        )
+
         self.conn.commit()
 
     def _create_indices(self):
@@ -595,6 +743,25 @@ class MemoryStore:
             "CREATE INDEX IF NOT EXISTS idx_learnings_sentiment ON learnings(sentiment)",
             "CREATE INDEX IF NOT EXISTS idx_learnings_source_type ON learnings(source_type)",
             "CREATE INDEX IF NOT EXISTS idx_learnings_created_at ON learnings(created_at DESC)",
+            # Facts indices
+            "CREATE INDEX IF NOT EXISTS idx_facts_subject ON facts(subject_entity_id)",
+            "CREATE INDEX IF NOT EXISTS idx_facts_object ON facts(object_entity_id)",
+            "CREATE INDEX IF NOT EXISTS idx_facts_predicate_type ON facts(predicate_type)",
+            "CREATE INDEX IF NOT EXISTS idx_facts_fact_type ON facts(fact_type)",
+            "CREATE INDEX IF NOT EXISTS idx_facts_source ON facts(source_type, source_id)",
+            "CREATE INDEX IF NOT EXISTS idx_facts_temporal ON facts(valid_from, valid_to)",
+            "CREATE INDEX IF NOT EXISTS idx_facts_current ON facts(is_current)",
+            "CREATE INDEX IF NOT EXISTS idx_facts_usage ON facts(times_used DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_facts_strength ON facts(strength DESC)",
+            # Retrieval tracking indices
+            "CREATE INDEX IF NOT EXISTS idx_retrieval_queries_type ON retrieval_queries(query_type)",
+            "CREATE INDEX IF NOT EXISTS idx_retrieval_queries_success ON retrieval_queries(was_successful)",
+            "CREATE INDEX IF NOT EXISTS idx_retrieval_queries_created ON retrieval_queries(created_at DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_retrieval_results_query ON retrieval_results(query_id)",
+            "CREATE INDEX IF NOT EXISTS idx_retrieval_results_method ON retrieval_results(retrieval_method, was_used)",
+            # Extraction calls indices
+            "CREATE INDEX IF NOT EXISTS idx_extraction_calls_source ON extraction_calls(source_type)",
+            "CREATE INDEX IF NOT EXISTS idx_extraction_calls_created ON extraction_calls(created_at DESC)",
         ]
 
         for idx in indices:
@@ -1221,6 +1388,599 @@ class MemoryStore:
             created_at=parse_datetime(row["created_at"]),
             updated_at=parse_datetime(row["updated_at"]),
         )
+
+    # ═══════════════════════════════════════════════════════════
+    # FACTS
+    # ═══════════════════════════════════════════════════════════
+
+    def create_fact(
+        self,
+        subject_entity_id: str,
+        predicate: str,
+        fact_text: str,
+        object_entity_id: str | None = None,
+        object_value: str | None = None,
+        object_type: str = "value",
+        mentioned_entity_ids: list[str] | None = None,
+        fact_type: str = "relation",
+        predicate_type: str | None = None,
+        fact_embedding: list[float] | None = None,
+        source_type: str = "conversation",
+        source_id: str | None = None,
+        source_event_ids: list[str] | None = None,
+        confidence: float = 0.8,
+        strength: float = 0.5,
+        valid_from: str | None = None,
+        valid_to: str | None = None,
+    ) -> Fact:
+        """Create a new fact."""
+        fact_id = generate_id()
+        now = now_iso()
+
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO facts (
+                id, subject_entity_id, predicate, object_entity_id, object_value,
+                object_type, mentioned_entity_ids, fact_type, predicate_type,
+                fact_text, fact_embedding, source_type, source_id, source_event_ids,
+                confidence, strength, valid_from, valid_to, is_current,
+                times_retrieved, times_used, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, 0, ?, ?)
+        """,
+            (
+                fact_id,
+                subject_entity_id,
+                predicate,
+                object_entity_id,
+                object_value,
+                object_type,
+                serialize_json(mentioned_entity_ids or []),
+                fact_type,
+                predicate_type,
+                fact_text,
+                serialize_embedding(fact_embedding),
+                source_type,
+                source_id,
+                serialize_json(source_event_ids or []),
+                confidence,
+                strength,
+                valid_from,
+                valid_to,
+                now,
+                now,
+            ),
+        )
+        self.conn.commit()
+
+        return Fact(
+            id=fact_id,
+            subject_entity_id=subject_entity_id,
+            predicate=predicate,
+            object_entity_id=object_entity_id,
+            object_value=object_value,
+            object_type=object_type,
+            mentioned_entity_ids=mentioned_entity_ids or [],
+            fact_type=fact_type,
+            predicate_type=predicate_type,
+            fact_text=fact_text,
+            fact_embedding=fact_embedding,
+            source_type=source_type,
+            source_id=source_id,
+            source_event_ids=source_event_ids or [],
+            confidence=confidence,
+            strength=strength,
+            valid_from=parse_datetime(valid_from) if valid_from else None,
+            valid_to=parse_datetime(valid_to) if valid_to else None,
+            is_current=True,
+            times_retrieved=0,
+            times_used=0,
+            created_at=parse_datetime(now),
+            updated_at=parse_datetime(now),
+        )
+
+    def get_fact(self, fact_id: str) -> Fact | None:
+        """Get a fact by ID."""
+        cur = self.conn.cursor()
+        cur.execute("SELECT * FROM facts WHERE id = ?", (fact_id,))
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return self._row_to_fact(row)
+
+    def find_fact(
+        self,
+        subject_entity_id: str,
+        predicate: str,
+        object_entity_id: str | None = None,
+        object_value: str | None = None,
+    ) -> Fact | None:
+        """Find an existing fact by triplet components (for deduplication)."""
+        cur = self.conn.cursor()
+
+        if object_entity_id:
+            cur.execute(
+                """
+                SELECT * FROM facts
+                WHERE subject_entity_id = ? AND predicate = ? AND object_entity_id = ? AND is_current = 1
+            """,
+                (subject_entity_id, predicate, object_entity_id),
+            )
+        elif object_value:
+            cur.execute(
+                """
+                SELECT * FROM facts
+                WHERE subject_entity_id = ? AND predicate = ? AND object_value = ? AND is_current = 1
+            """,
+                (subject_entity_id, predicate, object_value),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT * FROM facts
+                WHERE subject_entity_id = ? AND predicate = ? AND is_current = 1
+            """,
+                (subject_entity_id, predicate),
+            )
+
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return self._row_to_fact(row)
+
+    def get_facts_for_entity(
+        self,
+        entity_id: str,
+        direction: str = "both",
+        fact_type: str | None = None,
+        limit: int = 50,
+    ) -> list[Fact]:
+        """Get facts for an entity (as subject or object)."""
+        cur = self.conn.cursor()
+
+        conditions = ["is_current = 1"]
+        params = []
+
+        if direction == "subject":
+            conditions.append("subject_entity_id = ?")
+            params.append(entity_id)
+        elif direction == "object":
+            conditions.append("object_entity_id = ?")
+            params.append(entity_id)
+        else:  # both
+            conditions.append("(subject_entity_id = ? OR object_entity_id = ?)")
+            params.extend([entity_id, entity_id])
+
+        if fact_type:
+            conditions.append("fact_type = ?")
+            params.append(fact_type)
+
+        params.append(limit)
+        where_clause = " AND ".join(conditions)
+        cur.execute(
+            f"SELECT * FROM facts WHERE {where_clause} ORDER BY strength DESC LIMIT ?",
+            params,
+        )
+
+        return [self._row_to_fact(row) for row in cur.fetchall()]
+
+    def get_facts_by_source(
+        self, source_type: str, source_id: str, limit: int = 100
+    ) -> list[Fact]:
+        """Get facts from a specific source (e.g., a document)."""
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            SELECT * FROM facts
+            WHERE source_type = ? AND source_id = ? AND is_current = 1
+            ORDER BY created_at DESC LIMIT ?
+        """,
+            (source_type, source_id, limit),
+        )
+        return [self._row_to_fact(row) for row in cur.fetchall()]
+
+    def update_fact(self, fact: Fact):
+        """Update an existing fact."""
+        cur = self.conn.cursor()
+        now = now_iso()
+        cur.execute(
+            """
+            UPDATE facts SET
+                predicate = ?, object_entity_id = ?, object_value = ?, object_type = ?,
+                mentioned_entity_ids = ?, fact_type = ?, predicate_type = ?,
+                fact_text = ?, fact_embedding = ?, source_event_ids = ?,
+                confidence = ?, strength = ?, valid_from = ?, valid_to = ?,
+                is_current = ?, times_retrieved = ?, times_used = ?,
+                last_used_at = ?, updated_at = ?
+            WHERE id = ?
+        """,
+            (
+                fact.predicate,
+                fact.object_entity_id,
+                fact.object_value,
+                fact.object_type,
+                serialize_json(fact.mentioned_entity_ids),
+                fact.fact_type,
+                fact.predicate_type,
+                fact.fact_text,
+                serialize_embedding(fact.fact_embedding),
+                serialize_json(fact.source_event_ids),
+                fact.confidence,
+                fact.strength,
+                fact.valid_from.isoformat() if fact.valid_from else None,
+                fact.valid_to.isoformat() if fact.valid_to else None,
+                1 if fact.is_current else 0,
+                fact.times_retrieved,
+                fact.times_used,
+                fact.last_used_at.isoformat() if fact.last_used_at else None,
+                now,
+                fact.id,
+            ),
+        )
+        self.conn.commit()
+
+    def increment_fact_strength(self, fact_id: str, source_event_id: str | None = None):
+        """Increment a fact's strength when re-encountered (max 1.0)."""
+        cur = self.conn.cursor()
+        now = now_iso()
+
+        # Get current fact
+        cur.execute("SELECT strength, source_event_ids FROM facts WHERE id = ?", (fact_id,))
+        row = cur.fetchone()
+        if row is None:
+            return
+
+        new_strength = min(1.0, row["strength"] + 0.1)
+        source_ids = deserialize_json(row["source_event_ids"]) or []
+        if source_event_id and source_event_id not in source_ids:
+            source_ids.append(source_event_id)
+
+        cur.execute(
+            """
+            UPDATE facts SET strength = ?, source_event_ids = ?, updated_at = ?
+            WHERE id = ?
+        """,
+            (new_strength, serialize_json(source_ids), now, fact_id),
+        )
+        self.conn.commit()
+
+    def increment_fact_usage(self, fact_id: str):
+        """Increment usage counters when a fact is used in a response."""
+        cur = self.conn.cursor()
+        now = now_iso()
+        cur.execute(
+            """
+            UPDATE facts SET times_used = times_used + 1, last_used_at = ?, updated_at = ?
+            WHERE id = ?
+        """,
+            (now, now, fact_id),
+        )
+        self.conn.commit()
+
+    def increment_fact_retrieved(self, fact_id: str):
+        """Increment retrieval counter when a fact is found in search."""
+        cur = self.conn.cursor()
+        now = now_iso()
+        cur.execute(
+            """
+            UPDATE facts SET times_retrieved = times_retrieved + 1, updated_at = ?
+            WHERE id = ?
+        """,
+            (now, fact_id),
+        )
+        self.conn.commit()
+
+    def _row_to_fact(self, row: sqlite3.Row) -> Fact:
+        """Convert a database row to a Fact."""
+        return Fact(
+            id=row["id"],
+            subject_entity_id=row["subject_entity_id"],
+            predicate=row["predicate"],
+            object_entity_id=row["object_entity_id"],
+            object_value=row["object_value"],
+            object_type=row["object_type"],
+            mentioned_entity_ids=deserialize_json(row["mentioned_entity_ids"]) or [],
+            fact_type=row["fact_type"],
+            predicate_type=row["predicate_type"],
+            fact_text=row["fact_text"],
+            fact_embedding=deserialize_embedding(row["fact_embedding"]),
+            source_type=row["source_type"],
+            source_id=row["source_id"],
+            source_event_ids=deserialize_json(row["source_event_ids"]) or [],
+            confidence=row["confidence"],
+            strength=row["strength"],
+            valid_from=parse_datetime(row["valid_from"]),
+            valid_to=parse_datetime(row["valid_to"]),
+            is_current=bool(row["is_current"]),
+            times_retrieved=row["times_retrieved"],
+            times_used=row["times_used"],
+            last_used_at=parse_datetime(row["last_used_at"]),
+            created_at=parse_datetime(row["created_at"]),
+            updated_at=parse_datetime(row["updated_at"]),
+        )
+
+    # ═══════════════════════════════════════════════════════════
+    # RETRIEVAL TRACKING
+    # ═══════════════════════════════════════════════════════════
+
+    def create_retrieval_query(
+        self,
+        query_text: str,
+        query_embedding: list[float] | None = None,
+        query_type: str | None = None,
+        chain_strategy: list[str] | None = None,
+        objective_id: str | None = None,
+        event_id: str | None = None,
+    ) -> RetrievalQuery:
+        """Create a new retrieval query for tracking."""
+        query_id = generate_id()
+        now = now_iso()
+
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO retrieval_queries (
+                id, query_text, query_embedding, query_type, chain_strategy,
+                total_results, results_used, was_successful, total_time_ms,
+                objective_id, event_id, created_at
+            ) VALUES (?, ?, ?, ?, ?, 0, 0, 0, 0, ?, ?, ?)
+        """,
+            (
+                query_id,
+                query_text,
+                serialize_embedding(query_embedding),
+                query_type,
+                serialize_json(chain_strategy or []),
+                objective_id,
+                event_id,
+                now,
+            ),
+        )
+        self.conn.commit()
+
+        return RetrievalQuery(
+            id=query_id,
+            query_text=query_text,
+            query_embedding=query_embedding,
+            query_type=query_type,
+            chain_strategy=chain_strategy or [],
+            total_results=0,
+            results_used=0,
+            was_successful=False,
+            total_time_ms=0,
+            objective_id=objective_id,
+            event_id=event_id,
+            created_at=parse_datetime(now),
+        )
+
+    def update_retrieval_query(
+        self,
+        query_id: str,
+        total_results: int | None = None,
+        results_used: int | None = None,
+        was_successful: bool | None = None,
+        total_time_ms: int | None = None,
+    ):
+        """Update a retrieval query with results."""
+        cur = self.conn.cursor()
+
+        updates = []
+        params = []
+
+        if total_results is not None:
+            updates.append("total_results = ?")
+            params.append(total_results)
+        if results_used is not None:
+            updates.append("results_used = ?")
+            params.append(results_used)
+        if was_successful is not None:
+            updates.append("was_successful = ?")
+            params.append(1 if was_successful else 0)
+        if total_time_ms is not None:
+            updates.append("total_time_ms = ?")
+            params.append(total_time_ms)
+
+        if updates:
+            params.append(query_id)
+            cur.execute(
+                f"UPDATE retrieval_queries SET {', '.join(updates)} WHERE id = ?",
+                params,
+            )
+            self.conn.commit()
+
+    def create_retrieval_result(
+        self,
+        query_id: str,
+        result_type: str,
+        result_id: str,
+        retrieval_method: str,
+        method_step: int = 1,
+        similarity_score: float | None = None,
+        rank_position: int = 0,
+    ) -> RetrievalResult:
+        """Create a retrieval result record."""
+        result_record_id = generate_id()
+        now = now_iso()
+
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO retrieval_results (
+                id, query_id, result_type, result_id, retrieval_method,
+                method_step, similarity_score, rank_position, was_used, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+        """,
+            (
+                result_record_id,
+                query_id,
+                result_type,
+                result_id,
+                retrieval_method,
+                method_step,
+                similarity_score,
+                rank_position,
+                now,
+            ),
+        )
+        self.conn.commit()
+
+        return RetrievalResult(
+            id=result_record_id,
+            query_id=query_id,
+            result_type=result_type,
+            result_id=result_id,
+            retrieval_method=retrieval_method,
+            method_step=method_step,
+            similarity_score=similarity_score,
+            rank_position=rank_position,
+            was_used=False,
+            created_at=parse_datetime(now),
+        )
+
+    def mark_retrieval_result_used(self, result_id: str):
+        """Mark a retrieval result as used in a response."""
+        cur = self.conn.cursor()
+        cur.execute(
+            "UPDATE retrieval_results SET was_used = 1 WHERE id = ?",
+            (result_id,),
+        )
+        self.conn.commit()
+
+    def get_retrieval_stats_by_method(self, days: int = 30) -> dict:
+        """Get retrieval statistics by method for learning."""
+        cur = self.conn.cursor()
+        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+
+        cur.execute(
+            """
+            SELECT
+                retrieval_method,
+                COUNT(*) as total,
+                SUM(was_used) as used,
+                AVG(similarity_score) as avg_similarity
+            FROM retrieval_results
+            WHERE created_at > ?
+            GROUP BY retrieval_method
+        """,
+            (cutoff,),
+        )
+
+        stats = {}
+        for row in cur.fetchall():
+            method = row["retrieval_method"]
+            stats[method] = {
+                "total": row["total"],
+                "used": row["used"] or 0,
+                "use_rate": (row["used"] or 0) / row["total"] if row["total"] > 0 else 0,
+                "avg_similarity": row["avg_similarity"],
+            }
+
+        return stats
+
+    # ═══════════════════════════════════════════════════════════
+    # EXTRACTION CALLS (metrics)
+    # ═══════════════════════════════════════════════════════════
+
+    def create_extraction_call(
+        self,
+        source_type: str,
+        source_id: str | None = None,
+        content_length: int = 0,
+        entities_extracted: int = 0,
+        facts_extracted: int = 0,
+        topics_extracted: int = 0,
+        model: str = "",
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        cost_usd: float = 0.0,
+        duration_ms: int = 0,
+        timing_mode: str = "immediate",
+    ) -> ExtractionCall:
+        """Record an extraction LLM call for metrics."""
+        call_id = generate_id()
+        now = now_iso()
+
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO extraction_calls (
+                id, source_type, source_id, content_length,
+                entities_extracted, facts_extracted, topics_extracted,
+                model, input_tokens, output_tokens, cost_usd, duration_ms,
+                timing_mode, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+            (
+                call_id,
+                source_type,
+                source_id,
+                content_length,
+                entities_extracted,
+                facts_extracted,
+                topics_extracted,
+                model,
+                input_tokens,
+                output_tokens,
+                cost_usd,
+                duration_ms,
+                timing_mode,
+                now,
+            ),
+        )
+        self.conn.commit()
+
+        return ExtractionCall(
+            id=call_id,
+            source_type=source_type,
+            source_id=source_id,
+            content_length=content_length,
+            entities_extracted=entities_extracted,
+            facts_extracted=facts_extracted,
+            topics_extracted=topics_extracted,
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cost_usd=cost_usd,
+            duration_ms=duration_ms,
+            timing_mode=timing_mode,
+            created_at=parse_datetime(now),
+        )
+
+    def get_extraction_stats(self, days: int = 30) -> dict:
+        """Get extraction statistics for monitoring."""
+        cur = self.conn.cursor()
+        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+
+        cur.execute(
+            """
+            SELECT
+                source_type,
+                COUNT(*) as calls,
+                SUM(entities_extracted) as entities,
+                SUM(facts_extracted) as facts,
+                SUM(topics_extracted) as topics,
+                SUM(cost_usd) as total_cost,
+                AVG(duration_ms) as avg_duration
+            FROM extraction_calls
+            WHERE created_at > ?
+            GROUP BY source_type
+        """,
+            (cutoff,),
+        )
+
+        stats = {}
+        for row in cur.fetchall():
+            source = row["source_type"]
+            stats[source] = {
+                "calls": row["calls"],
+                "entities": row["entities"] or 0,
+                "facts": row["facts"] or 0,
+                "topics": row["topics"] or 0,
+                "total_cost": row["total_cost"] or 0,
+                "avg_duration_ms": row["avg_duration"] or 0,
+            }
+
+        return stats
 
     # ═══════════════════════════════════════════════════════════
     # TOPICS

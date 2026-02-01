@@ -532,8 +532,182 @@ class ExtractedFeedback:
 
 
 # ═══════════════════════════════════════════════════════════
+# FACT MODELS (unified triplet storage for all sources)
+# ═══════════════════════════════════════════════════════════
+
+
+@dataclass
+class Fact:
+    """A fact triplet (subject-predicate-object) extracted from any source.
+
+    Facts are the unified knowledge representation that can come from:
+    - Conversations (user messages, tool results)
+    - Documents (PDFs, Word docs, CSVs)
+    - Observations (agent self-observations)
+    - Tools (results from web searches, etc.)
+
+    Facts enable multiple retrieval methods:
+    - Semantic search on fact_text embedding
+    - Graph traversal from subject/object entities
+    - Keyword search on predicate/fact_text
+    - Temporal queries on valid_from/valid_to
+    """
+
+    id: str
+
+    # Triplet Core
+    subject_entity_id: str  # Always links to an entity
+    predicate: str  # The verb/relationship
+    object_entity_id: str | None = None  # If object is an entity
+    object_value: str | None = None  # If object is a literal value
+    object_type: str = "value"  # "entity" | "value" | "text"
+
+    # Additional entities mentioned in context
+    mentioned_entity_ids: list[str] = field(default_factory=list)
+
+    # Classification
+    fact_type: str = "relation"  # relation|attribute|event|state|metric
+    predicate_type: str | None = None  # Clustered: financial|professional|temporal|etc
+
+    # Human-readable (LLM-generated)
+    fact_text: str = ""  # Full sentence: "John invested $500K in TechCorp"
+    fact_embedding: list[float] | None = None  # Vector for semantic search
+
+    # Provenance
+    source_type: str = "conversation"  # conversation|document|tool|observation
+    source_id: str | None = None  # Event ID or file entity ID
+    source_event_ids: list[str] = field(default_factory=list)  # Accumulated over time
+
+    # Confidence & Strength
+    confidence: float = 0.8  # Extraction confidence
+    strength: float = 0.5  # Accumulated mentions (0-1)
+
+    # Temporality
+    valid_from: datetime | None = None  # When fact became true
+    valid_to: datetime | None = None  # When invalidated (None=current)
+    is_current: bool = True
+
+    # Usage tracking
+    times_retrieved: int = 0  # How often found in searches
+    times_used: int = 0  # How often used in responses
+    last_used_at: datetime | None = None
+
+    # Timestamps
+    created_at: datetime = field(default_factory=datetime.now)
+    updated_at: datetime = field(default_factory=datetime.now)
+
+    def __repr__(self) -> str:
+        obj = self.object_entity_id or self.object_value or "?"
+        return (
+            f"Fact(id={self.id[:8]}..., "
+            f"'{self.predicate}', obj={obj[:20] if obj else '?'}..., "
+            f"type={self.fact_type}, strength={self.strength:.2f})"
+        )
+
+
+@dataclass
+class RetrievalQuery:
+    """A tracked retrieval query for learning optimal retrieval strategies."""
+
+    id: str
+    query_text: str
+    query_embedding: list[float] | None = None
+    query_type: str | None = None  # Inferred: relationship|attribute|search|temporal
+
+    # Strategy used
+    chain_strategy: list[str] = field(default_factory=list)  # ["keyword", "graph", "semantic"]
+
+    # Outcome
+    total_results: int = 0
+    results_used: int = 0
+    was_successful: bool = False  # Did it answer the question?
+
+    # Performance
+    total_time_ms: int = 0
+
+    # Context
+    objective_id: str | None = None
+    event_id: str | None = None
+
+    created_at: datetime = field(default_factory=datetime.now)
+
+
+@dataclass
+class RetrievalResult:
+    """A single result from a retrieval query, for tracking what was useful."""
+
+    id: str
+    query_id: str  # FK to RetrievalQuery
+
+    # What was found
+    result_type: str  # fact|entity|event|summary
+    result_id: str  # ID of the found item
+
+    # How it was found
+    retrieval_method: str  # semantic|keyword|graph|direct
+    method_step: int = 1  # Position in chain (1, 2, 3...)
+
+    # Relevance
+    similarity_score: float | None = None  # If semantic search
+    rank_position: int = 0  # Position in results
+
+    # Usage
+    was_used: bool = False  # Was this result used in response?
+
+    created_at: datetime = field(default_factory=datetime.now)
+
+
+@dataclass
+class ExtractionCall:
+    """Metrics for a single extraction LLM call."""
+
+    id: str
+    source_type: str  # conversation|document|tool
+    source_id: str | None = None
+    content_length: int = 0  # Characters processed
+
+    # Results
+    entities_extracted: int = 0
+    facts_extracted: int = 0
+    topics_extracted: int = 0
+
+    # Cost tracking
+    model: str = ""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost_usd: float = 0.0
+    duration_ms: int = 0
+
+    # Timing decision
+    timing_mode: str = "immediate"  # immediate|background|on_demand
+
+    created_at: datetime = field(default_factory=datetime.now)
+
+
+# ═══════════════════════════════════════════════════════════
 # EXTRACTION MODELS (used by extraction pipeline)
 # ═══════════════════════════════════════════════════════════
+
+
+@dataclass
+class ExtractedFact:
+    """A fact extracted from content (before storage/deduplication)."""
+
+    subject: str  # Entity name
+    predicate: str  # The verb/relationship
+    object: str  # Entity name OR literal value
+    object_type: str = "value"  # "entity" | "value" | "text"
+
+    fact_type: str = "relation"  # relation|attribute|event|state|metric
+    fact_text: str = ""  # Full natural sentence
+    confidence: float = 0.8
+
+    # Temporality
+    valid_from: str | None = None  # ISO date if known
+    valid_to: str | None = None  # ISO date if known
+
+    # Additional entities mentioned in context
+    mentioned_entities: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -576,13 +750,17 @@ class ExtractedTopic:
 
 @dataclass
 class ExtractionResult:
-    """The result of extracting from an event."""
+    """The result of extracting from an event or document."""
 
     entities: list[ExtractedEntity] = field(default_factory=list)
-    edges: list[ExtractedEdge] = field(default_factory=list)
+    facts: list[ExtractedFact] = field(default_factory=list)
+    edges: list[ExtractedEdge] = field(default_factory=list)  # Legacy, still populated for compatibility
     topics: list[ExtractedTopic] = field(default_factory=list)
     task_type: str | None = None
     notes: str | None = None
+
+    # Metrics for this extraction
+    extraction_call_id: str | None = None
 
 
 # ═══════════════════════════════════════════════════════════

@@ -16,6 +16,7 @@ from .models import (
     ExtractionResult,
     ExtractedEdge,
     ExtractedEntity,
+    ExtractedFact,
     ExtractedTopic,
 )
 
@@ -128,11 +129,15 @@ class ExtractionPipeline:
         # Run LLM extraction
         result = await self._llm_extract(event, context)
 
-        # Process extracted entities
+        # Process extracted entities first (facts depend on them)
         for extracted in result.entities:
             await self._process_entity(extracted, event)
 
-        # Process extracted edges
+        # Process extracted facts
+        for extracted in result.facts:
+            await self._process_fact(extracted, event)
+
+        # Process extracted edges (legacy, for compatibility)
         for extracted in result.edges:
             await self._process_edge(extracted, event)
 
@@ -210,11 +215,22 @@ Extract:
    - Be specific with types ("venture capitalist" not just "person")
    - Note if an entity matches one in EXISTING ENTITIES
 
-2. RELATIONSHIPS - Connections between entities
-   - Be specific ("invested in" not "is related to")
-   - Include direction and whether it's current
+2. FACTS - Discrete pieces of information as triplets (subject-predicate-object)
+   - Extract EVERY factual statement as a separate fact
+   - Facts can have entities or literal values as objects
+   - Be comprehensive - dates, numbers, relationships, events, metrics
+   - Use natural, complete sentences for fact_text
 
-3. TOPICS - What themes/subjects does this relate to? (1-5 topics)
+   Fact types:
+   - relation: Relationship between entities (John works at Acme)
+   - attribute: Property of an entity (John's age is 35)
+   - event: Something that happened (Company was founded in 2020)
+   - state: Current status (Project status is active)
+   - metric: Numerical data (Revenue was $4.2M)
+
+3. EDGES - Connections between entities (legacy, still extract for compatibility)
+
+4. TOPICS - What themes/subjects does this relate to? (1-5 topics)
 
 Return valid JSON matching this schema:
 {
@@ -227,6 +243,20 @@ Return valid JSON matching this schema:
             "matched_entity_id": "id if matches existing entity, null otherwise",
             "match_confidence": 0.0-1.0,
             "importance": 0.0-1.0
+        }
+    ],
+    "facts": [
+        {
+            "subject": "entity name (required)",
+            "predicate": "verb or relationship",
+            "object": "entity name OR literal value",
+            "object_type": "entity|value|text",
+            "fact_type": "relation|attribute|event|state|metric",
+            "fact_text": "Full natural sentence expressing this fact",
+            "confidence": 0.0-1.0,
+            "valid_from": "ISO date if known, null otherwise",
+            "valid_to": "ISO date if known, null if current",
+            "mentioned_entities": ["other entities mentioned in context"]
         }
     ],
     "edges": [
@@ -285,9 +315,9 @@ Extract entities, relationships, and topics from this event."""
                 json_str = response_text[start:end]
                 data = json.loads(json_str)
             else:
-                data = {"entities": [], "edges": [], "topics": []}
+                data = {"entities": [], "facts": [], "edges": [], "topics": []}
         except json.JSONDecodeError:
-            data = {"entities": [], "edges": [], "topics": []}
+            data = {"entities": [], "facts": [], "edges": [], "topics": []}
 
         # Convert to ExtractionResult
         entities = []
@@ -301,6 +331,23 @@ Extract entities, relationships, and topics from this event."""
                     matched_entity_id=e.get("matched_entity_id"),
                     match_confidence=e.get("match_confidence", 0.0),
                     importance=e.get("importance", 0.5),
+                )
+            )
+
+        facts = []
+        for f in data.get("facts", []):
+            facts.append(
+                ExtractedFact(
+                    subject=f.get("subject", ""),
+                    predicate=f.get("predicate", ""),
+                    object=f.get("object", ""),
+                    object_type=f.get("object_type", "value"),
+                    fact_type=f.get("fact_type", "relation"),
+                    fact_text=f.get("fact_text", ""),
+                    confidence=f.get("confidence", 0.8),
+                    valid_from=f.get("valid_from"),
+                    valid_to=f.get("valid_to"),
+                    mentioned_entities=f.get("mentioned_entities", []),
                 )
             )
 
@@ -328,6 +375,7 @@ Extract entities, relationships, and topics from this event."""
 
         return ExtractionResult(
             entities=entities,
+            facts=facts,
             edges=edges,
             topics=topics,
             notes=data.get("notes"),
@@ -430,6 +478,92 @@ Extract entities, relationships, and topics from this event."""
             is_current=extracted.is_current,
             strength=extracted.strength,
             source_event_ids=[event.id],
+        )
+
+    async def _process_fact(self, extracted: ExtractedFact, event: Event):
+        """Process an extracted fact - resolve entities and store."""
+        if not extracted.subject or not extracted.predicate:
+            return
+
+        # Resolve subject entity (required)
+        subject_entities = self.store.find_entities(query=extracted.subject, limit=1)
+        if not subject_entities:
+            # Auto-create minimal entity for subject
+            subject_entity = self.store.create_entity(
+                name=extracted.subject,
+                type="concept",  # Default type
+                type_raw="extracted entity",
+                source_event_ids=[event.id],
+            )
+            subject_id = subject_entity.id
+        else:
+            subject_id = subject_entities[0].id
+
+        # Resolve object entity if object_type is "entity"
+        object_entity_id = None
+        object_value = None
+
+        if extracted.object_type == "entity" and extracted.object:
+            object_entities = self.store.find_entities(query=extracted.object, limit=1)
+            if object_entities:
+                object_entity_id = object_entities[0].id
+            else:
+                # Auto-create minimal entity for object
+                object_entity = self.store.create_entity(
+                    name=extracted.object,
+                    type="concept",
+                    type_raw="extracted entity",
+                    source_event_ids=[event.id],
+                )
+                object_entity_id = object_entity.id
+        else:
+            object_value = extracted.object
+
+        # Resolve mentioned entities
+        mentioned_entity_ids = []
+        for name in extracted.mentioned_entities:
+            entities = self.store.find_entities(query=name, limit=1)
+            if entities:
+                mentioned_entity_ids.append(entities[0].id)
+
+        # Check for existing fact (deduplication)
+        existing = self.store.find_fact(
+            subject_entity_id=subject_id,
+            predicate=extracted.predicate,
+            object_entity_id=object_entity_id,
+            object_value=object_value,
+        )
+
+        if existing:
+            # Increment strength and add source event
+            self.store.increment_fact_strength(existing.id, event.id)
+            return
+
+        # Generate embedding for fact text
+        fact_embedding = get_embedding(extracted.fact_text) if extracted.fact_text else None
+
+        # Cluster predicate type
+        predicate_type = await self._cluster_relation_type_llm(extracted.predicate)
+
+        # Create new fact
+        self.store.create_fact(
+            subject_entity_id=subject_id,
+            predicate=extracted.predicate,
+            fact_text=extracted.fact_text or f"{extracted.subject} {extracted.predicate} {extracted.object}",
+            object_entity_id=object_entity_id,
+            object_value=object_value,
+            object_type=extracted.object_type,
+            mentioned_entity_ids=mentioned_entity_ids,
+            fact_type=extracted.fact_type,
+            predicate_type=predicate_type,
+            fact_embedding=fact_embedding,
+            source_type="conversation",
+            source_id=event.id,
+            source_event_ids=[event.id],
+            confidence=extracted.confidence,
+            strength=0.5,
+            valid_from=extracted.valid_from,
+            valid_to=extracted.valid_to,
         )
 
     async def _process_topic(self, extracted: ExtractedTopic, event: Event):
