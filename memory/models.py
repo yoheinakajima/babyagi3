@@ -413,7 +413,7 @@ class Credential:
     """
 
     id: str
-    credential_type: str  # "account", "credit_card", "api_key"
+    credential_type: str  # "account", "credit_card"
     service: str  # "yohei.ai", "stripe.com", etc.
 
     # For user accounts
