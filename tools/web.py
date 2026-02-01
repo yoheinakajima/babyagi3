@@ -829,7 +829,7 @@ def fetch_url(url: str, extract: str = None) -> dict:
 # =============================================================================
 
 @tool(packages=["httpx"], env=["BROWSER_USE_API_KEY"])
-def browse_control(task_id: str, action: str) -> dict:
+def browse_control(action: str, task_id: str = None) -> dict:
     """Control a running browser task - pause, resume, or stop.
 
     Use this to intervene in long-running tasks. Useful when:
@@ -837,9 +837,11 @@ def browse_control(task_id: str, action: str) -> dict:
     - A task is stuck and needs to be stopped
     - You want to take over control temporarily
 
+    For "stop" action: if no task_id is provided, will stop all running tasks.
+
     Args:
-        task_id: The task ID returned from browse()
         action: Control action - "pause", "resume", or "stop"
+        task_id: The task ID returned from browse() (optional for stop action)
     """
     import httpx
 
@@ -867,6 +869,76 @@ def browse_control(task_id: str, action: str) -> dict:
 
     try:
         with httpx.Client(timeout=30) as client:
+            # If no task_id provided for stop action, find and stop running tasks
+            if task_id is None:
+                if action != "stop":
+                    return tool_error(
+                        f"task_id is required for {action} action",
+                        fix="Provide the task_id returned from browse()"
+                    )
+
+                # List running tasks and stop them
+                try:
+                    list_response = client.get(
+                        f"{BROWSER_USE_API_URL}/tasks",
+                        headers=headers
+                    )
+
+                    if list_response.status_code == 200:
+                        tasks_data = list_response.json()
+                        tasks = tasks_data.get("tasks", tasks_data) if isinstance(tasks_data, dict) else tasks_data
+
+                        if isinstance(tasks, list):
+                            running_tasks = [
+                                t for t in tasks
+                                if t.get("status", "").lower() in ("running", "pending", "created")
+                            ]
+
+                            if not running_tasks:
+                                return {
+                                    "action": "stop",
+                                    "status": "no_tasks",
+                                    "message": "No running tasks found to stop"
+                                }
+
+                            # Stop all running tasks
+                            stopped = []
+                            failed = []
+                            for task in running_tasks:
+                                tid = task.get("id")
+                                if tid:
+                                    try:
+                                        stop_response = client.patch(
+                                            f"{BROWSER_USE_API_URL}/tasks/{tid}",
+                                            headers=headers,
+                                            json={"status": "stopped"}
+                                        )
+                                        if stop_response.status_code in (200, 201, 202):
+                                            stopped.append(tid)
+                                        else:
+                                            failed.append(tid)
+                                    except Exception:
+                                        failed.append(tid)
+
+                            return {
+                                "action": "stop",
+                                "status": "success",
+                                "stopped_tasks": stopped,
+                                "failed_tasks": failed,
+                                "message": f"Stopped {len(stopped)} task(s)"
+                            }
+                except Exception as e:
+                    return {
+                        "error": f"Failed to list tasks: {str(e)}",
+                        "hint": "Provide a specific task_id to stop"
+                    }
+
+                return tool_error(
+                    "Could not find running tasks",
+                    fix="Provide a specific task_id to stop"
+                )
+
+            # Stop specific task
             response = client.patch(
                 f"{BROWSER_USE_API_URL}/tasks/{task_id}",
                 headers=headers,
