@@ -21,6 +21,7 @@ from .models import (
     Entity,
     Event,
     EventTopic,
+    Learning,
     SummaryNode,
     Task,
     ToolDefinition,
@@ -503,6 +504,47 @@ class MemoryStore:
         """
         )
 
+        # Learnings table - for self-improvement system
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS learnings (
+                id TEXT PRIMARY KEY,
+
+                -- Source
+                source_type TEXT NOT NULL,
+                source_event_id TEXT,
+
+                -- Content
+                content TEXT NOT NULL,
+                content_embedding BLOB,
+
+                -- Classification
+                sentiment TEXT NOT NULL DEFAULT 'neutral',
+                confidence REAL DEFAULT 0.5,
+
+                -- Associations
+                tool_id TEXT,
+                topic_ids TEXT,
+                objective_type TEXT,
+                entity_ids TEXT,
+
+                -- Actionable insight
+                applies_when TEXT,
+                recommendation TEXT,
+
+                -- Stats
+                times_applied INTEGER DEFAULT 0,
+                last_applied_at TEXT,
+
+                -- Timestamps
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+
+                FOREIGN KEY (source_event_id) REFERENCES events(id)
+            )
+        """
+        )
+
         self.conn.commit()
 
     def _create_indices(self):
@@ -547,6 +589,12 @@ class MemoryStore:
             "CREATE INDEX IF NOT EXISTS idx_llm_calls_thread ON llm_calls(thread_id)",
             "CREATE INDEX IF NOT EXISTS idx_embedding_calls_timestamp ON embedding_calls(timestamp DESC)",
             "CREATE INDEX IF NOT EXISTS idx_embedding_calls_model ON embedding_calls(model)",
+            # Learnings indices
+            "CREATE INDEX IF NOT EXISTS idx_learnings_tool ON learnings(tool_id)",
+            "CREATE INDEX IF NOT EXISTS idx_learnings_objective_type ON learnings(objective_type)",
+            "CREATE INDEX IF NOT EXISTS idx_learnings_sentiment ON learnings(sentiment)",
+            "CREATE INDEX IF NOT EXISTS idx_learnings_source_type ON learnings(source_type)",
+            "CREATE INDEX IF NOT EXISTS idx_learnings_created_at ON learnings(created_at DESC)",
         ]
 
         for idx in indices:
@@ -1617,17 +1665,31 @@ class MemoryStore:
         )
         self.conn.commit()
 
-    def increment_staleness(self, node_id: str):
-        """Increment staleness counter for a node."""
+    def increment_staleness(self, node_id_or_key: str):
+        """Increment staleness counter for a node by ID or key."""
         cur = self.conn.cursor()
-        cur.execute(
-            """
-            UPDATE summary_nodes
-            SET events_since_update = events_since_update + 1, updated_at = ?
-            WHERE id = ?
-        """,
-            (now_iso(), node_id),
-        )
+
+        # Check if it's a key (contains ':' or is a known key like 'root', 'user_preferences')
+        if ":" in node_id_or_key or node_id_or_key in ("root", "user_preferences"):
+            # It's a key, look up by key
+            cur.execute(
+                """
+                UPDATE summary_nodes
+                SET events_since_update = events_since_update + 1, updated_at = ?
+                WHERE key = ?
+            """,
+                (now_iso(), node_id_or_key),
+            )
+        else:
+            # It's an ID
+            cur.execute(
+                """
+                UPDATE summary_nodes
+                SET events_since_update = events_since_update + 1, updated_at = ?
+                WHERE id = ?
+            """,
+                (now_iso(), node_id_or_key),
+            )
         self.conn.commit()
 
     def _row_to_summary_node(self, row: sqlite3.Row) -> SummaryNode:
@@ -2797,6 +2859,268 @@ class MemoryStore:
             updated_at=parse_datetime(row["updated_at"]),
             last_used_at=parse_datetime(row["last_used_at"]),
         )
+
+    # ═══════════════════════════════════════════════════════════
+    # LEARNINGS (Self-Improvement System)
+    # ═══════════════════════════════════════════════════════════
+
+    def create_learning(self, learning: Learning) -> Learning:
+        """Create a new learning from feedback or evaluation."""
+        cur = self.conn.cursor()
+        now = now_iso()
+
+        # Ensure ID exists
+        if not learning.id:
+            learning.id = generate_id()
+
+        cur.execute(
+            """
+            INSERT INTO learnings
+            (id, source_type, source_event_id, content, content_embedding,
+             sentiment, confidence, tool_id, topic_ids, objective_type,
+             entity_ids, applies_when, recommendation, times_applied,
+             last_applied_at, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+            (
+                learning.id,
+                learning.source_type,
+                learning.source_event_id,
+                learning.content,
+                serialize_embedding(learning.content_embedding),
+                learning.sentiment,
+                learning.confidence,
+                learning.tool_id,
+                serialize_json(learning.topic_ids),
+                learning.objective_type,
+                serialize_json(learning.entity_ids),
+                learning.applies_when,
+                learning.recommendation,
+                learning.times_applied,
+                learning.last_applied_at.isoformat() if learning.last_applied_at else None,
+                now,
+                now,
+            ),
+        )
+        self.conn.commit()
+        return learning
+
+    def get_learning(self, learning_id: str) -> Learning | None:
+        """Get a learning by ID."""
+        cur = self.conn.cursor()
+        cur.execute("SELECT * FROM learnings WHERE id = ?", (learning_id,))
+        row = cur.fetchone()
+        return self._row_to_learning(row) if row else None
+
+    def find_learnings(
+        self,
+        tool_id: str | None = None,
+        objective_type: str | None = None,
+        sentiment: str | None = None,
+        source_type: str | None = None,
+        limit: int = 20,
+    ) -> list[Learning]:
+        """Find learnings by filters."""
+        cur = self.conn.cursor()
+
+        query = "SELECT * FROM learnings WHERE 1=1"
+        params = []
+
+        if tool_id:
+            query += " AND tool_id = ?"
+            params.append(tool_id)
+        if objective_type:
+            query += " AND objective_type = ?"
+            params.append(objective_type)
+        if sentiment:
+            query += " AND sentiment = ?"
+            params.append(sentiment)
+        if source_type:
+            query += " AND source_type = ?"
+            params.append(source_type)
+
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+
+        cur.execute(query, params)
+        return [self._row_to_learning(row) for row in cur.fetchall()]
+
+    def search_learnings(
+        self,
+        embedding: list[float],
+        tool_id: str | None = None,
+        objective_type: str | None = None,
+        limit: int = 10,
+    ) -> list[Learning]:
+        """Search learnings by vector similarity.
+
+        Uses cosine similarity on content_embedding.
+        Falls back to recent learnings if no embeddings available.
+        """
+        cur = self.conn.cursor()
+
+        # Build filter conditions
+        conditions = ["content_embedding IS NOT NULL"]
+        params = []
+
+        if tool_id:
+            conditions.append("tool_id = ?")
+            params.append(tool_id)
+        if objective_type:
+            conditions.append("objective_type = ?")
+            params.append(objective_type)
+
+        where_clause = " AND ".join(conditions)
+
+        cur.execute(f"SELECT * FROM learnings WHERE {where_clause}", params)
+        rows = cur.fetchall()
+
+        if not rows:
+            # Fallback to recent learnings without embeddings
+            return self.find_learnings(
+                tool_id=tool_id,
+                objective_type=objective_type,
+                limit=limit,
+            )
+
+        # Calculate similarities and sort
+        scored = []
+        for row in rows:
+            row_embedding = deserialize_embedding(row["content_embedding"])
+            if row_embedding:
+                similarity = self._cosine_similarity(embedding, row_embedding)
+                scored.append((similarity, row))
+
+        # Sort by similarity descending
+        scored.sort(key=lambda x: x[0], reverse=True)
+
+        return [self._row_to_learning(row) for _, row in scored[:limit]]
+
+    def get_learnings_for_tool(self, tool_id: str, limit: int = 5) -> list[Learning]:
+        """Get learnings specific to a tool, prioritizing corrections."""
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            SELECT * FROM learnings
+            WHERE tool_id = ?
+            ORDER BY
+                CASE sentiment WHEN 'negative' THEN 0 ELSE 1 END,
+                created_at DESC
+            LIMIT ?
+        """,
+            (tool_id, limit),
+        )
+        return [self._row_to_learning(row) for row in cur.fetchall()]
+
+    def get_all_learnings(self, limit: int = 100) -> list[Learning]:
+        """Get all learnings, ordered by recency."""
+        cur = self.conn.cursor()
+        cur.execute(
+            "SELECT * FROM learnings ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        )
+        return [self._row_to_learning(row) for row in cur.fetchall()]
+
+    def record_learning_applied(self, learning_id: str):
+        """Record that a learning was used in context."""
+        cur = self.conn.cursor()
+        now = now_iso()
+        cur.execute(
+            """
+            UPDATE learnings
+            SET times_applied = times_applied + 1,
+                last_applied_at = ?,
+                updated_at = ?
+            WHERE id = ?
+        """,
+            (now, now, learning_id),
+        )
+        self.conn.commit()
+
+    def delete_learning(self, learning_id: str) -> bool:
+        """Delete a learning by ID."""
+        cur = self.conn.cursor()
+        cur.execute("DELETE FROM learnings WHERE id = ?", (learning_id,))
+        deleted = cur.rowcount > 0
+        self.conn.commit()
+        return deleted
+
+    def get_learning_stats(self) -> dict:
+        """Get aggregate statistics about learnings."""
+        cur = self.conn.cursor()
+
+        cur.execute("SELECT COUNT(*) as total FROM learnings")
+        total = cur.fetchone()["total"]
+
+        cur.execute(
+            """
+            SELECT sentiment, COUNT(*) as count
+            FROM learnings
+            GROUP BY sentiment
+        """
+        )
+        by_sentiment = {row["sentiment"]: row["count"] for row in cur.fetchall()}
+
+        cur.execute(
+            """
+            SELECT source_type, COUNT(*) as count
+            FROM learnings
+            GROUP BY source_type
+        """
+        )
+        by_source = {row["source_type"]: row["count"] for row in cur.fetchall()}
+
+        cur.execute(
+            """
+            SELECT tool_id, COUNT(*) as count
+            FROM learnings
+            WHERE tool_id IS NOT NULL
+            GROUP BY tool_id
+            ORDER BY count DESC
+            LIMIT 10
+        """
+        )
+        by_tool = {row["tool_id"]: row["count"] for row in cur.fetchall()}
+
+        return {
+            "total": total,
+            "by_sentiment": by_sentiment,
+            "by_source": by_source,
+            "by_tool": by_tool,
+        }
+
+    def _row_to_learning(self, row: sqlite3.Row) -> Learning:
+        """Convert a database row to a Learning."""
+        return Learning(
+            id=row["id"],
+            source_type=row["source_type"],
+            source_event_id=row["source_event_id"],
+            content=row["content"],
+            content_embedding=deserialize_embedding(row["content_embedding"]),
+            sentiment=row["sentiment"],
+            confidence=row["confidence"],
+            tool_id=row["tool_id"],
+            topic_ids=deserialize_json(row["topic_ids"]) or [],
+            objective_type=row["objective_type"],
+            entity_ids=deserialize_json(row["entity_ids"]) or [],
+            applies_when=row["applies_when"],
+            recommendation=row["recommendation"],
+            times_applied=row["times_applied"],
+            last_applied_at=parse_datetime(row["last_applied_at"]),
+            created_at=parse_datetime(row["created_at"]),
+            updated_at=parse_datetime(row["updated_at"]),
+        )
+
+    def _cosine_similarity(self, a: list[float], b: list[float]) -> float:
+        """Calculate cosine similarity between two vectors."""
+        if len(a) != len(b):
+            return 0.0
+        dot = sum(x * y for x, y in zip(a, b))
+        norm_a = sum(x * x for x in a) ** 0.5
+        norm_b = sum(x * x for x in b) ** 0.5
+        if norm_a == 0 or norm_b == 0:
+            return 0.0
+        return dot / (norm_a * norm_b)
 
     # ═══════════════════════════════════════════════════════════
     # METRICS

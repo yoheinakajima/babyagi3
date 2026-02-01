@@ -451,6 +451,87 @@ class Credential:
 
 
 # ═══════════════════════════════════════════════════════════
+# LEARNING MODELS (for self-improvement system)
+# ═══════════════════════════════════════════════════════════
+
+
+@dataclass
+class Learning:
+    """A piece of learned knowledge from feedback or self-evaluation.
+
+    Learnings are extracted from:
+    - User feedback in messages (corrections, preferences, complaints)
+    - Self-evaluation of completed objectives
+    - Direct observations
+
+    They are stored with embeddings for vector search and tied to:
+    - Specific tools (how to use them better)
+    - Objective types (how to approach similar tasks)
+    - Topics (domain-specific knowledge)
+    - Entities (person-specific preferences)
+    """
+
+    id: str
+
+    # Source
+    source_type: str  # "user_feedback", "self_evaluation", "observation"
+    source_event_id: str | None  # Event that triggered this learning
+
+    # Content
+    content: str  # The actual learning/insight
+    content_embedding: list[float] | None = None  # For vector search
+
+    # Classification
+    sentiment: str = "neutral"  # "positive", "negative", "neutral"
+    confidence: float = 0.5  # 0-1, how confident we are in this learning
+
+    # Associations (what this learning is about)
+    tool_id: str | None = None  # If about a specific tool
+    topic_ids: list[str] = field(default_factory=list)  # Related topics
+    objective_type: str | None = None  # Type of objective (e.g., "research", "code", "email")
+    entity_ids: list[str] = field(default_factory=list)  # Related entities (people, orgs)
+
+    # Actionable insight
+    applies_when: str | None = None  # Condition when this learning applies
+    recommendation: str | None = None  # What to do differently
+
+    # Stats
+    times_applied: int = 0  # How often this learning was used in context
+    last_applied_at: datetime | None = None
+
+    # Timestamps
+    created_at: datetime = field(default_factory=datetime.now)
+    updated_at: datetime = field(default_factory=datetime.now)
+
+    def __repr__(self) -> str:
+        content_preview = self.content[:40] + "..." if len(self.content) > 40 else self.content
+        source = f"{self.source_type}"
+        if self.tool_id:
+            source += f" (tool: {self.tool_id})"
+        elif self.objective_type:
+            source += f" (obj: {self.objective_type})"
+        return (
+            f"Learning(id={self.id[:8]}..., {source}, "
+            f"sentiment={self.sentiment}, content='{content_preview}')"
+        )
+
+
+@dataclass
+class ExtractedFeedback:
+    """Feedback extracted from a user message (before creating Learning)."""
+
+    has_feedback: bool = False
+    feedback_type: str | None = None  # "correction", "praise", "preference", "complaint"
+    about_tool: str | None = None
+    about_objective_type: str | None = None
+    about_entity_id: str | None = None
+    what_was_wrong: str | None = None
+    what_to_do_instead: str | None = None
+    sentiment: str = "neutral"
+    confidence: float = 0.5
+
+
+# ═══════════════════════════════════════════════════════════
 # EXTRACTION MODELS (used by extraction pipeline)
 # ═══════════════════════════════════════════════════════════
 
@@ -526,6 +607,10 @@ class AssembledContext:
     topics: list[dict] = field(default_factory=list)
     counterparty: dict | None = None
 
+    # Self-improvement (learnings from feedback and evaluation)
+    user_preferences: str = ""  # Summarized user preferences (always included)
+    learnings: list[dict] = field(default_factory=list)  # Context-specific learnings
+
     def to_dict(self) -> dict:
         """Convert to dictionary, excluding None values."""
         result = {
@@ -544,6 +629,10 @@ class AssembledContext:
             result["topics"] = self.topics
         if self.counterparty:
             result["counterparty"] = self.counterparty
+        if self.user_preferences:
+            result["user_preferences"] = self.user_preferences
+        if self.learnings:
+            result["learnings"] = self.learnings
         return result
 
     def to_prompt(self) -> str:
@@ -625,5 +714,22 @@ class AssembledContext:
             sections.append("\n## Recent Activity")
             if self.recent.get("summary"):
                 sections.append(self.recent["summary"])
+
+        # User Preferences (always included if available)
+        if self.user_preferences:
+            sections.append("\n## User Preferences")
+            sections.append(self.user_preferences)
+
+        # Relevant Learnings (context-specific)
+        if self.learnings:
+            sections.append("\n## Relevant Learnings")
+            for learning in self.learnings:
+                learn_type = learning.get("type", "general")
+                if learn_type == "tool":
+                    sections.append(f"- **{learning.get('tool', 'Tool')}**: {learning.get('learning', '')}")
+                else:
+                    sections.append(f"- {learning.get('learning', '')}")
+                if learning.get("recommendation"):
+                    sections.append(f"  \u2192 {learning['recommendation']}")
 
         return "\n".join(sections)
