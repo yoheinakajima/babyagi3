@@ -401,7 +401,7 @@ and returns the result.
 
 ### Memory Tool
 
-Append-only log with search capability.
+Persistent memory with semantic search, entity extraction, and knowledge graph capabilities.
 
 ```python
 # Store a memory
@@ -412,12 +412,44 @@ agent.run("What's the server IP?")
 
 # List recent memories
 agent.run("Show me my recent memories")
+
+# Find entities in the knowledge graph
+agent.run("What do I know about John Smith?")
+
+# Get a summary of what you know about a topic
+agent.run("Summarize what you know about our cloud infrastructure")
 ```
 
 **Actions:**
 - `store` — Save content to memory with timestamp
 - `search` — Find memories by keyword (returns last 10 matches)
 - `list` — Show recent memories (last 20)
+- `find_entity` — Search entities in the knowledge graph (type: person/org/concept)
+- `find_relationship` — Find connections between entities
+- `get_summary` — Get summary of a topic from memory
+- `get_context` — Get full context for the current conversation
+- `deep_search` — Cross-reference search across events, entities, and topics
+- `list_tools` — List all registered tools with usage stats
+- `tool_stats` — Get detailed statistics for a specific tool
+- `problematic_tools` — Find tools with high error rates
+
+**Convenience Methods (for dynamic tools):**
+
+Dynamic tools can access memory directly via agent methods:
+
+```python
+# In a dynamic tool function
+def my_tool(params: dict, agent) -> dict:
+    # Search memory
+    result = agent.memory_recall("server IP")
+    # Returns: {"memories": [{"content": "...", "timestamp": "...", "channel": "..."}]}
+
+    # Store to memory
+    result = agent.memory_store("New fact discovered")
+    # Returns: {"stored": True, "event_id": "..."}
+
+    return {"success": True}
+```
 
 ### Notes Tool
 
@@ -1265,13 +1297,33 @@ Wait for the verification email and complete the signup.
 
 ## On "Organized Memory"
 
-The elegance is in not over-engineering this. The approach:
+The memory system balances simplicity with power:
 
-1. **Append-only log** — every memory is immutable, timestamped
-2. **Semantic search** — keyword match (swap for embeddings in production)
-3. **Summarization on read** — the LLM itself summarizes relevant memories at query time
+1. **Append-only event log** — Every interaction is immutable, timestamped
+2. **Automatic entity extraction** — People, organizations, and concepts are extracted into a knowledge graph
+3. **Relationship tracking** — Connections between entities are discovered and stored
+4. **Hierarchical summaries** — Automatic summarization at multiple levels (recent, daily, weekly)
+5. **Context assembly** — Smart context building for each conversation turn
 
-You don't need a complex knowledge graph. **The LLM is the organizer.** Give it raw memories and let it synthesize.
+**The LLM is still the organizer.** The knowledge graph provides structure, but the LLM synthesizes meaning.
+
+**Thread Repair:**
+
+If tool execution fails mid-conversation, the message history can become corrupted (orphaned `tool_use` without matching `tool_result`). The agent automatically repairs this:
+
+```python
+# Automatic repair on every run_async call
+# Manual repair if needed
+result = agent.repair_thread("main")
+# Returns: {"repaired": 1, "message": "Repaired 1 orphaned tool_use block(s)"}
+```
+
+**Graceful Degradation:**
+
+Memory features degrade gracefully:
+- If SQLite is unavailable, falls back to in-memory storage
+- If entity extraction fails, events are still logged
+- If summarization fails, raw events are still searchable
 
 ## API Reference
 
@@ -1295,8 +1347,15 @@ class Agent(EventEmitter):
         context: dict = None  # Channel context (is_owner, sender, channel)
     ) -> str
     async def run_scheduler(self) -> None  # Start the scheduler loop
+
+    # Thread management
     def get_thread(self, thread_id: str = "main") -> list
     def clear_thread(self, thread_id: str = "main") -> None
+    def repair_thread(self, thread_id: str = "main") -> dict  # Fix corrupted threads
+
+    # Memory convenience methods (for dynamic tools)
+    def memory_recall(self, query: str) -> dict  # Search memory
+    def memory_store(self, content: str) -> dict  # Store to memory
 
     # Event methods (inherited from EventEmitter)
     def on(self, event: str, handler: Callable) -> Callable  # Subscribe

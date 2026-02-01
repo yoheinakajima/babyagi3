@@ -805,6 +805,17 @@ Work autonomously. Use tools as needed. When done, provide a brief summary of wh
             self._current_context = context
 
             thread = self.threads.setdefault(thread_id, [])
+
+            # Auto-repair corrupted threads (orphaned tool_use without tool_result)
+            # This prevents "tool_use ids were found without tool_result blocks" errors
+            if thread:
+                repair_result = self.repair_thread(thread_id)
+                if repair_result.get("repaired", 0) > 0:
+                    self.emit("thread_repaired", {
+                        "thread_id": thread_id,
+                        "repaired": repair_result["repaired"]
+                    })
+
             thread.append({"role": "user", "content": user_input})
 
             # Refresh tool selection for this turn
@@ -841,6 +852,9 @@ Work autonomously. Use tools as needed. When done, provide a brief summary of wh
                     return self._extract_text(response)
 
                 # Execute tools (in thread pool to avoid blocking event loop)
+                # CRITICAL: We must ensure a tool_result is appended for every tool_use,
+                # even if execution fails. Otherwise the thread becomes corrupted and
+                # the API will reject subsequent messages.
                 tool_results = []
                 for block in response.content:
                     if block.type == "tool_use":
@@ -851,24 +865,48 @@ Work autonomously. Use tools as needed. When done, provide a brief summary of wh
                         })
 
                         start_time = time.time()
-                        # Run tool in thread pool to prevent blocking the event loop
-                        # This allows scheduler and other async tasks to run during tool execution
-                        result = await asyncio.to_thread(
-                            self.tools[block.name].execute, block.input, self
-                        )
+                        result = None
+                        error_msg = None
+
+                        try:
+                            # Check if tool exists
+                            if block.name not in self.tools:
+                                error_msg = f"Tool '{block.name}' not found"
+                                result = {"error": error_msg}
+                            else:
+                                # Run tool in thread pool to prevent blocking the event loop
+                                # This allows scheduler and other async tasks to run during tool execution
+                                result = await asyncio.to_thread(
+                                    self.tools[block.name].execute, block.input, self
+                                )
+                        except Exception as e:
+                            # Tool execution failed - capture the error
+                            error_msg = f"Tool execution failed: {str(e)}"
+                            result = {"error": error_msg}
+
                         duration_ms = int((time.time() - start_time) * 1000)
 
-                        # Emit tool_end event
+                        # Emit tool_end event (even on error, for logging)
                         self.emit("tool_end", {
                             "name": block.name,
                             "result": result,
                             "duration_ms": duration_ms
                         })
 
+                        # Serialize result safely
+                        try:
+                            result_json = json.dumps(result, default=json_serialize)
+                        except Exception as e:
+                            # JSON serialization failed - use error message instead
+                            result_json = json.dumps({
+                                "error": f"Result serialization failed: {str(e)}",
+                                "original_type": type(result).__name__
+                            })
+
                         tool_results.append({
                             "type": "tool_result",
                             "tool_use_id": block.id,
-                            "content": json.dumps(result, default=json_serialize)
+                            "content": result_json
                         })
 
                 thread.append({"role": "user", "content": tool_results})
@@ -1128,7 +1166,7 @@ Work autonomously. Use tools as needed. When done, provide a final summary."""
             account_check_rule = """
 BEFORE CREATING ANY ACCOUNT:
 1. Use search_credentials(query="servicename") to check if you already have an account
-2. Use memory_recall() to check if you've used this service before
+2. Use memory(action="search", query="servicename") to check if you've used this service before
 3. Only create a new account if you confirm none exists"""
 
         return f"""You are {agent_name}, {agent_description}.
@@ -1212,9 +1250,11 @@ Credential Management:
 - store_secret(key, value) - Store API keys and tokens
 - get_secret(key) - Retrieve stored secrets
 
-Memory:
-- memory_store(fact) - Store a fact for later recall
-- memory_recall(query) - Search your memory for relevant facts
+Memory (use the memory tool):
+- memory(action="store", content="fact") - Store a fact for later recall
+- memory(action="search", query="...") - Search your memory for relevant facts
+- memory(action="list") - List recent memories
+- memory(action="find_entity", query="...", type="person/org/concept") - Find entities in knowledge graph
 
 CREDENTIAL SECURITY (CRITICAL):
 When you create accounts, obtain API keys, or handle any sensitive credentials:
@@ -1387,6 +1427,142 @@ RESPONDING TO EXTERNAL REQUESTS:
 
     def clear_thread(self, thread_id: str = "main"):
         self.threads[thread_id] = []
+
+    # -------------------------------------------------------------------------
+    # Memory Convenience Methods
+    # -------------------------------------------------------------------------
+
+    def memory_recall(self, query: str) -> dict:
+        """
+        Search memory for information matching the query.
+
+        This is a convenience method for dynamic tools and external code.
+        It works whether enhanced memory is enabled or not.
+
+        Args:
+            query: Search query string
+
+        Returns:
+            dict with "memories" list of matching results, or "error" on failure
+        """
+        if self.memory is not None:
+            try:
+                events = self.memory.search_events(query, limit=10)
+                return {
+                    "memories": [
+                        {
+                            "content": e.content[:500] if e.content else "",
+                            "timestamp": e.timestamp.isoformat() if e.timestamp else None,
+                            "channel": getattr(e, "channel", None),
+                        }
+                        for e in events
+                    ]
+                }
+            except Exception as e:
+                return {"error": f"Memory search failed: {e}"}
+        else:
+            # Fallback to simple in-memory search
+            query_lower = query.lower()
+            matches = [m for m in MEMORIES if query_lower in m.get("content", "").lower()]
+            return {"memories": matches[-10:]}
+
+    def memory_store(self, content: str) -> dict:
+        """
+        Store a fact or observation in memory.
+
+        This is a convenience method for dynamic tools and external code.
+        It works whether enhanced memory is enabled or not.
+
+        Args:
+            content: The fact or observation to store
+
+        Returns:
+            dict with "stored": True on success, or "error" on failure
+        """
+        if self.memory is not None:
+            try:
+                event = self.memory.log_event(
+                    content=content,
+                    event_type="observation",
+                    channel=None,
+                    direction="internal",
+                    is_owner=True,
+                )
+                return {"stored": True, "event_id": event.id}
+            except Exception as e:
+                return {"error": f"Memory store failed: {e}"}
+        else:
+            # Fallback to simple in-memory storage
+            memory = {"content": content, "ts": datetime.now().isoformat()}
+            MEMORIES.append(memory)
+            return {"stored": True}
+
+    # -------------------------------------------------------------------------
+    # Thread Repair
+    # -------------------------------------------------------------------------
+
+    def repair_thread(self, thread_id: str = "main") -> dict:
+        """
+        Repair a corrupted thread by fixing orphaned tool_use blocks.
+
+        The Anthropic API requires every tool_use block to have a matching
+        tool_result. If tool execution crashes, the thread can be left in
+        a corrupted state with tool_use but no tool_result.
+
+        This method scans the thread and adds error tool_results for any
+        orphaned tool_use blocks.
+
+        Args:
+            thread_id: The thread to repair
+
+        Returns:
+            dict with repair statistics
+        """
+        thread = self.threads.get(thread_id)
+        if not thread:
+            return {"repaired": 0, "message": "Thread not found or empty"}
+
+        # Find all tool_use IDs that need results
+        pending_tool_use_ids = set()
+        repaired_count = 0
+
+        for msg in thread:
+            if msg.get("role") == "assistant":
+                content = msg.get("content", [])
+                if isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") == "tool_use":
+                            pending_tool_use_ids.add(block.get("id"))
+                        elif hasattr(block, "type") and block.type == "tool_use":
+                            pending_tool_use_ids.add(block.id)
+
+            elif msg.get("role") == "user":
+                content = msg.get("content", [])
+                if isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") == "tool_result":
+                            pending_tool_use_ids.discard(block.get("tool_use_id"))
+
+        # If there are orphaned tool_use blocks, add error results
+        if pending_tool_use_ids:
+            error_results = [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": tool_id,
+                    "content": json.dumps({
+                        "error": "Tool execution failed - thread repaired",
+                        "repaired": True
+                    })
+                }
+                for tool_id in pending_tool_use_ids
+            ]
+            thread.append({"role": "user", "content": error_results})
+            repaired_count = len(pending_tool_use_ids)
+
+        return {
+            "repaired": repaired_count,
+            "message": f"Repaired {repaired_count} orphaned tool_use block(s)" if repaired_count else "Thread is healthy"
+        }
 
 
 # =============================================================================
