@@ -28,6 +28,8 @@ This means the entire system reduces to: **a loop that processes messages and de
 - **YAML Configuration** — Easy channel setup with environment variable substitution
 - **Tool Health System** — Automatic detection of available tools and missing dependencies
 - **Extensible Channels** — Add new channels by implementing simple listener/sender patterns
+- **Tool Persistence** — Dynamically created tools survive restarts with health tracking
+- **Credential Storage** — Secure storage for accounts and payment methods with keyring integration
 
 ### Previous (v0.2.0)
 
@@ -35,8 +37,6 @@ This means the entire system reduces to: **a loop that processes messages and de
 - **e2b Sandbox** — Safe code execution for dynamically created tools
 - **External Tools** — Web search, browser automation, email, secrets management
 - **API Server** — FastAPI server mode with full REST API
-- **Tool Persistence** — Dynamically created tools survive restarts with health tracking
-- **Credential Storage** — Secure storage for accounts and payment methods with keyring integration
 
 ## Architecture
 
@@ -686,32 +686,7 @@ agent.run("Get my github.com password - I need to log in")
 | `credit_card` | last 4 digits, card type, expiry, billing address | full card number, CVV |
 | `api_key` | service name, description | API key value |
 
-**Credential model:**
-
-```python
-Credential {
-    id: str
-    credential_type: str           # "account", "credit_card", "api_key"
-    service: str                   # "github.com", "stripe.com", etc.
-
-    # Account fields
-    username: str | None
-    email: str | None
-    password_ref: str | None       # Reference to keyring entry
-
-    # Credit card fields
-    card_last_four: str | None     # Only last 4 stored in DB
-    card_type: str | None          # Auto-detected: visa, mastercard, amex, discover
-    card_expiry: str | None        # "MM/YY"
-    card_ref: str | None           # Reference to full card in keyring
-    billing_name: str | None
-    billing_address: str | None
-
-    # Metadata
-    notes: str | None
-    last_used_at: datetime | None
-}
-```
+See the `Credential` model in [The Data Model](#the-data-model) section for the full schema.
 
 **Security guarantees:**
 - Passwords are **never** stored in the database
@@ -1061,15 +1036,14 @@ agent = Agent(load_tools=False)  # Only core tools loaded
 
 ### Persistent Storage
 
-Swap the in-memory lists for a database:
+BabyAGI uses SQLite for all persistent data by default:
 
-```python
-# In production, replace MEMORIES and NOTES with:
-# - SQLite for simplicity
-# - PostgreSQL for scale
-# - Redis for speed
-# - Vector DB for semantic search
-```
+- **Tool definitions** — Dynamic tools stored in `tool_definitions` table
+- **Credentials** — Account metadata in `credentials` table (secrets in keyring)
+- **Scheduled tasks** — Stored in `~/.babyagi/scheduler/tasks.json`
+- **Memory/Events** — Stored in SQLite with the memory system
+
+For production scaling, you can swap SQLite for PostgreSQL or add Redis caching.
 
 ## Tool Health System
 
