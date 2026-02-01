@@ -79,8 +79,8 @@ def main():
             console.system("Usage: python main.py [serve|channels|cli|all]")
             sys.exit(1)
     else:
-        # Default: CLI only (original behavior)
-        asyncio.run(run_cli_only())
+        # Default: Run all enabled channels
+        asyncio.run(run_all_channels())
 
 
 async def run_cli_only():
