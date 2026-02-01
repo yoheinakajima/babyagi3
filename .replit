@@ -32,3 +32,7 @@ args = "python main.py all"
 [[ports]]
 localPort = 5000
 externalPort = 80
+
+[deployment]
+run = ["sh", "-c", "python main.py all"]
+deploymentTarget = "cloudrun"
