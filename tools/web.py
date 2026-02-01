@@ -23,7 +23,7 @@ import time
 from tools import tool, tool_error
 
 # Browser Use Cloud API configuration
-BROWSER_USE_API_URL = "https://api.browser-use.com/api/v1"
+BROWSER_USE_API_URL = "https://api.browser-use.com/api/v2"
 
 # Available LLM models for browser automation
 BROWSER_USE_MODELS = {
@@ -39,7 +39,7 @@ def _get_headers() -> dict:
     """Get API headers with authentication."""
     api_key = os.environ.get("BROWSER_USE_API_KEY")
     return {
-        "Authorization": f"Bearer {api_key}",
+        "X-Browser-Use-API-Key": api_key,
         "Content-Type": "application/json"
     }
 
@@ -145,11 +145,11 @@ def browse(
     if model:
         model_id = BROWSER_USE_MODELS.get(model, model)
         if model_id:
-            payload["model"] = model_id
+            payload["llm"] = model_id
 
     # Add structured output schema
     if output_schema:
-        payload["outputSchema"] = output_schema
+        payload["structuredOutput"] = output_schema
 
     # Add session reuse
     if session_id:
@@ -163,7 +163,7 @@ def browse(
         # Create task
         with httpx.Client(timeout=30) as client:
             response = client.post(
-                f"{BROWSER_USE_API_URL}/run-task",
+                f"{BROWSER_USE_API_URL}/tasks",
                 headers=headers,
                 json=payload
             )
@@ -196,7 +196,7 @@ def browse(
                 waited += poll_interval
 
                 status_response = client.get(
-                    f"{BROWSER_USE_API_URL}/task/{task_id}",
+                    f"{BROWSER_USE_API_URL}/tasks/{task_id}",
                     headers=headers
                 )
 
@@ -210,9 +210,10 @@ def browse(
                     # Stop the session to save credits (unless saving for reuse)
                     if not save_session and returned_session_id:
                         try:
-                            client.post(
-                                f"{BROWSER_USE_API_URL}/session/{returned_session_id}/stop",
-                                headers=headers
+                            client.patch(
+                                f"{BROWSER_USE_API_URL}/sessions/{returned_session_id}",
+                                headers=headers,
+                                json={"status": "stopped"}
                             )
                         except Exception:
                             pass
@@ -454,7 +455,7 @@ def browse_with_credentials(
     if model:
         model_id = BROWSER_USE_MODELS.get(model, model)
         if model_id:
-            payload["model"] = model_id
+            payload["llm"] = model_id
 
     if session_id:
         payload["sessionId"] = session_id
@@ -465,7 +466,7 @@ def browse_with_credentials(
     try:
         with httpx.Client(timeout=30) as client:
             response = client.post(
-                f"{BROWSER_USE_API_URL}/run-task",
+                f"{BROWSER_USE_API_URL}/tasks",
                 headers=headers,
                 json=payload
             )
@@ -497,7 +498,7 @@ def browse_with_credentials(
                 waited += poll_interval
 
                 status_response = client.get(
-                    f"{BROWSER_USE_API_URL}/task/{task_id}",
+                    f"{BROWSER_USE_API_URL}/tasks/{task_id}",
                     headers=headers
                 )
 
@@ -510,9 +511,10 @@ def browse_with_credentials(
                 if status in ("finished", "completed", "done"):
                     if not save_session and returned_session_id:
                         try:
-                            client.post(
-                                f"{BROWSER_USE_API_URL}/session/{returned_session_id}/stop",
-                                headers=headers
+                            client.patch(
+                                f"{BROWSER_USE_API_URL}/sessions/{returned_session_id}",
+                                headers=headers,
+                                json={"status": "stopped"}
                             )
                         except Exception:
                             pass
@@ -664,13 +666,13 @@ def browse_checkout(
         "maxSteps": max_steps,
         "secrets": secrets,
         "allowedDomains": allowed_domains,
-        "useVision": False,  # Disable vision to prevent card number in screenshots
+        "vision": False,  # Disable vision to prevent card number in screenshots
     }
 
     if model:
         model_id = BROWSER_USE_MODELS.get(model, model)
         if model_id:
-            payload["model"] = model_id
+            payload["llm"] = model_id
 
     if session_id:
         payload["sessionId"] = session_id
@@ -678,7 +680,7 @@ def browse_checkout(
     try:
         with httpx.Client(timeout=30) as client:
             response = client.post(
-                f"{BROWSER_USE_API_URL}/run-task",
+                f"{BROWSER_USE_API_URL}/tasks",
                 headers=headers,
                 json=payload
             )
@@ -710,7 +712,7 @@ def browse_checkout(
                 waited += poll_interval
 
                 status_response = client.get(
-                    f"{BROWSER_USE_API_URL}/task/{task_id}",
+                    f"{BROWSER_USE_API_URL}/tasks/{task_id}",
                     headers=headers
                 )
 
@@ -724,9 +726,10 @@ def browse_checkout(
                     # Stop session to ensure card data isn't persisted
                     if returned_session_id:
                         try:
-                            client.post(
-                                f"{BROWSER_USE_API_URL}/session/{returned_session_id}/stop",
-                                headers=headers
+                            client.patch(
+                                f"{BROWSER_USE_API_URL}/sessions/{returned_session_id}",
+                                headers=headers,
+                                json={"status": "stopped"}
                             )
                         except Exception:
                             pass
@@ -747,9 +750,10 @@ def browse_checkout(
                     # Stop session on failure too
                     if returned_session_id:
                         try:
-                            client.post(
-                                f"{BROWSER_USE_API_URL}/session/{returned_session_id}/stop",
-                                headers=headers
+                            client.patch(
+                                f"{BROWSER_USE_API_URL}/sessions/{returned_session_id}",
+                                headers=headers,
+                                json={"status": "stopped"}
                             )
                         except Exception:
                             pass
@@ -846,7 +850,14 @@ def browse_control(task_id: str, action: str) -> dict:
             fix="Get your API key at https://cloud.browser-use.com and set BROWSER_USE_API_KEY"
         )
 
-    if action not in ("pause", "resume", "stop"):
+    # Map actions to v2 API status values
+    action_map = {
+        "pause": "paused",
+        "resume": "running",
+        "stop": "stopped"
+    }
+
+    if action not in action_map:
         return tool_error(
             f"Invalid action: {action}",
             fix="Use one of: pause, resume, stop"
@@ -856,9 +867,10 @@ def browse_control(task_id: str, action: str) -> dict:
 
     try:
         with httpx.Client(timeout=30) as client:
-            response = client.post(
-                f"{BROWSER_USE_API_URL}/task/{task_id}/{action}",
-                headers=headers
+            response = client.patch(
+                f"{BROWSER_USE_API_URL}/tasks/{task_id}",
+                headers=headers,
+                json={"status": action_map[action]}
             )
 
             if response.status_code not in (200, 201, 202):
@@ -954,9 +966,10 @@ def browse_session(action: str, session_id: str = None, profile_id: str = None) 
                         fix="Provide the session_id to stop"
                     )
 
-                response = client.post(
-                    f"{BROWSER_USE_API_URL}/session/{session_id}/stop",
-                    headers=headers
+                response = client.patch(
+                    f"{BROWSER_USE_API_URL}/sessions/{session_id}",
+                    headers=headers,
+                    json={"status": "stopped"}
                 )
 
                 if response.status_code not in (200, 201, 202, 204):
