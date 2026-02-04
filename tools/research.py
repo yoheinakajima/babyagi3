@@ -58,6 +58,58 @@ from tools import tool, tool_error
 
 
 # ═══════════════════════════════════════════════════════════
+# MEMORY INTEGRATION - Log research findings for extraction
+# ═══════════════════════════════════════════════════════════
+
+
+def _log_to_memory(agent, content: str, event_type: str = "research_finding", metadata: dict = None):
+    """
+    Log research findings to memory for extraction into searchable knowledge.
+
+    This ensures research data (enrichments, findings, etc.) gets extracted
+    by the memory system and becomes part of the agent's searchable knowledge.
+
+    Args:
+        agent: The agent instance (to access memory)
+        content: The content to log (will be extracted for entities/facts)
+        event_type: Type of event (research_finding, research_summary, etc.)
+        metadata: Optional metadata dict
+    """
+    if agent is None:
+        return
+
+    try:
+        # Access memory through agent
+        memory = getattr(agent, 'memory', None)
+        if memory is None:
+            return
+
+        # Log the event for extraction
+        memory.log_event(
+            content=content,
+            event_type=event_type,
+            direction="internal",
+            metadata=metadata or {},
+        )
+    except Exception:
+        pass  # Never fail research operations due to memory logging
+
+
+def _format_enrichment_for_memory(item_name: str, collection_name: str, updates: dict) -> str:
+    """Format enrichment data into natural language for extraction."""
+    lines = [f"Research finding about {item_name} (from {collection_name} collection):"]
+
+    for key, value in updates.items():
+        if key.startswith("_"):
+            continue  # Skip internal fields
+        if value is not None and value != "":
+            # Format as natural language for better extraction
+            lines.append(f"- {key.replace('_', ' ').title()}: {value}")
+
+    return "\n".join(lines)
+
+
+# ═══════════════════════════════════════════════════════════
 # DATA COLLECTION - Persistent batch data storage
 # ═══════════════════════════════════════════════════════════
 
@@ -793,6 +845,16 @@ def export_collection(
     with open(output_path, 'w', newline='') as f:
         f.write(output.getvalue())
 
+    # Log research completion summary to memory
+    if agent and row_count > 0:
+        summary = f"Research complete: Exported {row_count} items from '{coll['name']}' collection to {output_path}. Columns: {', '.join(export_cols[:5])}{'...' if len(export_cols) > 5 else ''}."
+        _log_to_memory(
+            agent,
+            content=summary,
+            event_type="research_summary",
+            metadata={"collection": coll["name"], "row_count": row_count, "output_path": output_path}
+        )
+
     return {
         "exported": output_path,
         "collection": coll["name"],
@@ -886,6 +948,17 @@ def update_collection_item(
         WHERE id = ?
     """, params)
     conn.commit()
+
+    # Log enrichment to memory for extraction into searchable knowledge
+    if status == "enriched" and updates and agent:
+        item_name = item_data.get(coll["key_field"], row["key_value"])
+        content = _format_enrichment_for_memory(item_name, coll["name"], updates)
+        _log_to_memory(
+            agent,
+            content=content,
+            event_type="research_finding",
+            metadata={"collection": coll["name"], "item_id": row["id"]}
+        )
 
     return {
         "updated": row["id"],
@@ -1409,6 +1482,16 @@ def import_collection(
     if errors:
         result["errors"] = errors[:10]  # Limit error messages
         result["error_count"] = len(errors)
+
+    # Log import to memory for awareness
+    if agent and added > 0:
+        summary = f"Imported {added} items into '{name}' collection from {source or 'unknown source'}. Total items now: {total}."
+        _log_to_memory(
+            agent,
+            content=summary,
+            event_type="research_import",
+            metadata={"collection": name, "imported": added, "source": source}
+        )
 
     return result
 
