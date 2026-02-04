@@ -3,15 +3,113 @@ Email Listener - Poll inbox and process incoming emails.
 
 Monitors the agent's email inbox and routes messages to the agent.
 Owner emails are auto-replied; external emails let the agent decide.
+
+Also detects meeting invites and automatically schedules bots to join.
 """
 
 import asyncio
 import logging
 import os
+import re
 
 from utils.email_client import get_client, get_inbox_id
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Meeting Invite Detection
+# =============================================================================
+
+def is_meeting_invite(subject: str, body: str) -> bool:
+    """
+    Detect if an email is likely a meeting invite.
+
+    Checks for:
+    - Calendar invite patterns (.ics, VCALENDAR)
+    - Meeting URLs (Zoom, Meet, Teams, etc.)
+    - Common invitation phrases
+    """
+    # Check for ICS/calendar content
+    if "BEGIN:VCALENDAR" in body or "text/calendar" in body.lower():
+        return True
+
+    # Check for meeting URLs
+    meeting_url_patterns = [
+        r'zoom\.us/j/',
+        r'meet\.google\.com/',
+        r'teams\.microsoft\.com/',
+        r'webex\.com/',
+        r'gotomeeting\.com/',
+    ]
+    for pattern in meeting_url_patterns:
+        if re.search(pattern, body, re.IGNORECASE):
+            return True
+
+    # Check subject for invite keywords
+    invite_keywords = [
+        "invitation:", "invite:", "meeting invite",
+        "calendar invite", "you're invited", "join meeting",
+    ]
+    subject_lower = subject.lower()
+    for keyword in invite_keywords:
+        if keyword in subject_lower:
+            return True
+
+    return False
+
+
+async def handle_meeting_invite(
+    email_body: str,
+    email_subject: str,
+    sender: str,
+    owner_phone: str = None,
+    sendblue_sender = None,
+) -> dict:
+    """
+    Handle a detected meeting invite email.
+
+    Extracts meeting URL and schedules a bot to join.
+    Optionally notifies owner via SMS.
+
+    Returns:
+        Result dict with meeting info and bot status
+    """
+    try:
+        from tools.meeting import handle_meeting_invite_email
+
+        result = await handle_meeting_invite_email(
+            email_content=email_body,
+            email_subject=email_subject,
+            auto_join=True,
+        )
+
+        # Notify owner if SMS is configured
+        if owner_phone and sendblue_sender and "error" not in result:
+            bot_info = result.get("bot", {})
+            bot_id = bot_info.get("id", "unknown")
+            meeting_time = result.get("meeting_time", "unknown time")
+
+            notification = (
+                f"Meeting invite received from {sender}\n"
+                f"Subject: {email_subject}\n"
+                f"Time: {meeting_time}\n"
+                f"Bot scheduled: {bot_id[:8]}..."
+            )
+
+            try:
+                await sendblue_sender.send(to=owner_phone, content=notification)
+            except Exception as e:
+                logger.error(f"Failed to send meeting notification: {e}")
+
+        return result
+
+    except ImportError:
+        logger.warning("Meeting tools not available, skipping invite handling")
+        return {"error": "Meeting tools not available"}
+    except Exception as e:
+        logger.error(f"Error handling meeting invite: {e}")
+        return {"error": str(e)}
 
 
 async def run_email_listener(agent, config: dict = None):
@@ -93,6 +191,32 @@ async def run_email_listener(agent, config: dict = None):
                     "message_id": msg_id,
                     "reply_to": msg_id,
                 }
+
+                # Check if this is a meeting invite
+                if is_meeting_invite(subject, body):
+                    logger.info(f"Detected meeting invite from {sender}: {subject[:50]}")
+
+                    # Get SMS sender for notifications
+                    sendblue_sender = agent.senders.get("sendblue")
+                    owner_phone = os.environ.get("OWNER_PHONE", "")
+
+                    # Handle the meeting invite
+                    invite_result = await handle_meeting_invite(
+                        email_body=body,
+                        email_subject=subject,
+                        sender=sender,
+                        owner_phone=owner_phone if is_owner else None,
+                        sendblue_sender=sendblue_sender,
+                    )
+
+                    if "error" not in invite_result:
+                        logger.info(f"Meeting bot scheduled for invite: {invite_result.get('meeting_url')}")
+                        # Mark as processed and continue (don't also send to agent)
+                        processed_ids.add(msg_id)
+                        continue
+                    else:
+                        logger.warning(f"Meeting invite handling failed: {invite_result.get('error')}")
+                        # Fall through to normal processing
 
                 # Format input with email context
                 email_input = f"[Email from {sender}]\nSubject: {subject}\n\n{body}"

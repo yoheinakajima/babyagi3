@@ -119,6 +119,39 @@ class SendBlueWebhookPayload(BaseModel):
 
 
 # =============================================================================
+# Recall.ai Webhook Models
+# =============================================================================
+
+class RecallTranscriptWord(BaseModel):
+    """A word in the transcript."""
+    text: str
+    start_time: Optional[float] = None
+    end_time: Optional[float] = None
+    confidence: Optional[float] = None
+
+
+class RecallTranscriptData(BaseModel):
+    """Real-time transcript data from Recall.ai."""
+    bot_id: Optional[str] = None
+    transcript: Optional[dict] = None
+    # Transcript contains: speaker, speaker_id, words[], is_final
+
+
+class RecallBotStatusChange(BaseModel):
+    """Bot status change webhook from Recall.ai."""
+    event: Optional[str] = None  # "bot.status_change"
+    data: Optional[dict] = None
+    # data contains: bot_id, status, status_changes[]
+
+
+class RecallTranscriptDone(BaseModel):
+    """Transcript done webhook from Recall.ai."""
+    event: Optional[str] = None  # "transcript.done"
+    data: Optional[dict] = None
+    # data contains: bot_id, transcript_id
+
+
+# =============================================================================
 # Endpoints
 # =============================================================================
 
@@ -325,6 +358,168 @@ async def sendblue_webhook(
     background_tasks.add_task(process_and_reply)
 
     return {"status": "ok", "message": "processing"}
+
+
+# =============================================================================
+# Recall.ai Webhooks
+# =============================================================================
+
+@app.post("/webhooks/recall/realtime")
+async def recall_realtime_webhook(
+    request: Request,
+    background_tasks: BackgroundTasks,
+):
+    """
+    Receive real-time transcript data from Recall.ai.
+
+    This endpoint receives transcript chunks as they're generated during the meeting.
+    Used for live backchannel insights via SMS.
+
+    Configure this URL in your Recall.ai bot's realtime_endpoints.
+    """
+    try:
+        payload = await request.json()
+    except Exception as e:
+        logger.error(f"Failed to parse Recall realtime webhook: {e}")
+        return {"status": "error", "message": "Invalid JSON"}
+
+    bot_id = payload.get("bot_id")
+    transcript = payload.get("transcript", {})
+
+    if not bot_id or not transcript:
+        return {"status": "ok", "message": "no_data"}
+
+    logger.debug(f"Recall realtime transcript for bot {bot_id}: {transcript.get('speaker', 'unknown')}")
+
+    # Process in background
+    async def process_realtime():
+        try:
+            from tools.meeting import get_meeting_processor
+            processor = get_meeting_processor()
+            processor.add_transcript_segment(bot_id, transcript)
+        except Exception as e:
+            logger.error(f"Error processing realtime transcript: {e}")
+
+    background_tasks.add_task(process_realtime)
+
+    return {"status": "ok"}
+
+
+@app.post("/webhooks/recall/status")
+async def recall_status_webhook(
+    request: Request,
+    background_tasks: BackgroundTasks,
+):
+    """
+    Receive bot status change events from Recall.ai.
+
+    Status flow: ready → joining_call → in_waiting_room → in_call_recording → call_ended → done
+
+    Configure this URL in your Recall.ai dashboard webhook settings.
+    """
+    try:
+        payload = await request.json()
+    except Exception as e:
+        logger.error(f"Failed to parse Recall status webhook: {e}")
+        return {"status": "error", "message": "Invalid JSON"}
+
+    event_type = payload.get("event")
+    data = payload.get("data", {})
+    bot_id = data.get("bot_id")
+    status = data.get("status", {}).get("code")
+
+    logger.info(f"Recall bot status change: bot={bot_id}, status={status}, event={event_type}")
+
+    # Handle meeting end - trigger post-meeting processing
+    if status in ("call_ended", "done", "analysis_done"):
+        async def process_meeting_end():
+            try:
+                from tools.meeting import get_meeting_processor, RecallClient
+
+                processor = get_meeting_processor()
+                client = RecallClient()
+
+                # Fetch full transcript
+                transcript_data = await client.get_bot_transcript(bot_id)
+                if "error" in transcript_data:
+                    logger.error(f"Failed to fetch transcript for bot {bot_id}: {transcript_data}")
+                    return
+
+                # Get bot details for metadata
+                bot_data = await client.get_bot(bot_id)
+                meeting_metadata = {
+                    "title": bot_data.get("meeting_metadata", {}).get("title", "Meeting"),
+                    "platform": bot_data.get("meeting_url", "").split("/")[2] if bot_data.get("meeting_url") else None,
+                    "duration_minutes": 0,  # Calculate from timestamps if available
+                }
+
+                # Process the completed meeting
+                summary = await processor.process_completed_meeting(
+                    bot_id=bot_id,
+                    transcript_data=transcript_data,
+                    meeting_metadata=meeting_metadata,
+                )
+
+                # Notify owner
+                owner_phone = os.environ.get("OWNER_PHONE", "")
+                if owner_phone and "sendblue" in agent.senders:
+                    notification = f"Meeting ended: {meeting_metadata.get('title', 'Meeting')}\n\n"
+                    notification += f"Summary: {summary.summary[:300]}..."
+                    if summary.action_items:
+                        notification += f"\n\nAction items: {len(summary.action_items)}"
+
+                    try:
+                        await agent.senders["sendblue"].send(
+                            to=owner_phone,
+                            content=notification,
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to send meeting notification: {e}")
+
+                logger.info(f"Processed completed meeting {bot_id}: {meeting_metadata.get('title')}")
+
+            except Exception as e:
+                logger.error(f"Error processing meeting end for bot {bot_id}: {e}")
+
+        background_tasks.add_task(process_meeting_end)
+
+    return {"status": "ok"}
+
+
+@app.post("/webhooks/recall")
+async def recall_general_webhook(
+    request: Request,
+    background_tasks: BackgroundTasks,
+):
+    """
+    General Recall.ai webhook endpoint.
+
+    Handles multiple event types and routes to appropriate handlers.
+    Configure this URL in your Recall.ai dashboard as the main webhook.
+    """
+    try:
+        payload = await request.json()
+    except Exception as e:
+        logger.error(f"Failed to parse Recall webhook: {e}")
+        return {"status": "error", "message": "Invalid JSON"}
+
+    event_type = payload.get("event", "")
+    logger.info(f"Recall webhook received: event={event_type}")
+
+    # Route to appropriate handler
+    if event_type == "bot.status_change":
+        return await recall_status_webhook(request, background_tasks)
+    elif event_type in ("transcript.data", "transcript.partial_data"):
+        # Reconstruct request-like object for realtime handler
+        return await recall_realtime_webhook(request, background_tasks)
+    elif event_type == "transcript.done":
+        # Transcript done is similar to bot status done
+        data = payload.get("data", {})
+        bot_id = data.get("bot_id")
+        logger.info(f"Transcript done for bot {bot_id}")
+        # The status webhook will handle the actual processing when bot status changes to done
+
+    return {"status": "ok", "event": event_type}
 
 
 # =============================================================================

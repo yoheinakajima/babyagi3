@@ -43,6 +43,37 @@ channels:
     api_secret: "${SENDBLUE_API_SECRET:}"
     from_number: "${SENDBLUE_PHONE_NUMBER:}"  # Your SendBlue phone number
 
+  # Meeting Bot via Recall.ai
+  # Join meetings, transcribe, summarize, and store to memory
+  meeting:
+    enabled: true
+    api_key: "${RECALL_API_KEY:}"
+    region: "${RECALL_REGION:us-west-2}"
+    bot_name: "${RECALL_BOT_NAME:BabyAGI Notetaker}"
+    webhook_url: "${RECALL_WEBHOOK_URL:}"  # Your server's public URL for webhooks
+
+    # Backchannel settings - send live insights during meetings
+    backchannel:
+      enabled: true
+      interval_seconds: 300  # Send insights every 5 minutes during meeting
+
+    # Meeting filtering - which meetings to auto-join
+    filters:
+      min_duration_minutes: 15  # Skip meetings shorter than 15 min
+      max_duration_minutes: 480  # Skip meetings longer than 8 hours
+      require_external_attendees: false  # Only join if external people present
+      require_invite_keyword: null  # e.g., "record" - only join if keyword in title
+      exclude_keywords: []  # Skip if these words in title, e.g., ["1:1", "standup"]
+      only_if_invited_email: true  # Only join if bot email is explicitly invited
+
+    # Calendar integration (requires OAuth setup)
+    calendar:
+      enabled: false
+      platform: "google"  # or "microsoft"
+      oauth_client_id: "${GOOGLE_OAUTH_CLIENT_ID:}"
+      oauth_client_secret: "${GOOGLE_OAUTH_CLIENT_SECRET:}"
+      auto_join_all: false  # If true, join all meetings on calendar
+
   # SMS via Twilio (example - implement TwilioSender)
   # sms:
   #   enabled: false
