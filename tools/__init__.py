@@ -393,7 +393,7 @@ def check_tool_health(include_core: bool = True) -> dict:
     if include_core:
         core_tools = ["memory", "objective", "notes", "register_tool", "store_credential", "get_credential", "list_credentials"]
         # Research tools are also always available (no external deps)
-        research_tools = ["data_collection", "checkpoint", "rate_limit", "export_collection", "update_collection_item", "batch_next", "research_progress", "pace_work", "reset_collection_items"]
+        research_tools = ["data_collection", "checkpoint", "rate_limit", "export_collection", "update_collection_item", "batch_next", "research_progress", "pace_work", "reset_collection_items", "import_collection", "cursor_state"]
         health["ready"] = core_tools + research_tools + health["ready"]
 
         # Check E2B for sandbox capability

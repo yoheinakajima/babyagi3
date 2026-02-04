@@ -98,6 +98,7 @@ def _init_research_tables(conn: sqlite3.Connection):
             collection_id TEXT NOT NULL,
             key_value TEXT NOT NULL,
             data TEXT NOT NULL,
+            source TEXT,
             status TEXT DEFAULT 'pending',
             enriched_at TEXT,
             error TEXT,
@@ -108,6 +109,12 @@ def _init_research_tables(conn: sqlite3.Connection):
             UNIQUE (collection_id, key_value)
         )
     """)
+
+    # Add source column if it doesn't exist (migration for existing DBs)
+    try:
+        cur.execute("ALTER TABLE collection_items ADD COLUMN source TEXT")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
 
     # Checkpoints for resumable tasks
     cur.execute("""
@@ -135,6 +142,21 @@ def _init_research_tables(conn: sqlite3.Connection):
         )
     """)
 
+    # Cursor states for API pagination (CRM, etc.)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS cursor_states (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            cursor_value TEXT,
+            page_number INTEGER DEFAULT 0,
+            total_fetched INTEGER DEFAULT 0,
+            has_more INTEGER DEFAULT 1,
+            metadata TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+
     conn.commit()
 
 
@@ -147,7 +169,9 @@ def data_collection(
     key_field: str = None,
     item: dict = None,
     items: list = None,
+    source: str = None,
     filter_status: str = None,
+    filter_source: str = None,
     limit: int = None,
     offset: int = 0,
     collection_id: str = None,
@@ -179,7 +203,9 @@ def data_collection(
         key_field: Field to dedupe on, e.g. "name" or "website" (for create)
         item: Single item to add (for add)
         items: Multiple items to add (for add)
+        source: Track where items came from, e.g. "crm_hubspot", "web_search", "csv_import" (for add)
         filter_status: Filter by status: pending, processing, enriched, error (for query)
+        filter_source: Filter by source (for query)
         limit: Max items to return (for query)
         offset: Skip first N items (for query)
         collection_id: Collection ID (alternative to name)
@@ -192,11 +218,14 @@ def data_collection(
                        schema={"name": "string", "website": "string", "focus": "string", "stage": "string"},
                        key_field="name")
 
-    Example - Add VCs (auto-dedupes):
-        data_collection(action="add", name="vc_list", items=[
+    Example - Add VCs from web search (with source tracking):
+        data_collection(action="add", name="vc_list", source="web_search", items=[
             {"name": "Sequoia", "website": "sequoiacap.com"},
             {"name": "a16z", "website": "a16z.com"}
         ])
+
+    Example - Add from CRM:
+        data_collection(action="add", name="contacts", source="hubspot_page_1", items=[...])
     """
     conn = _get_research_db()
     cur = conn.cursor()
@@ -270,9 +299,9 @@ def data_collection(
 
             try:
                 cur.execute("""
-                    INSERT INTO collection_items (id, collection_id, key_value, data, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                """, (item_id, coll["id"], key_value, json.dumps(itm), now, now))
+                    INSERT INTO collection_items (id, collection_id, key_value, data, source, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (item_id, coll["id"], key_value, json.dumps(itm), source, now, now))
                 added += 1
             except sqlite3.IntegrityError:
                 # Already exists - this is expected deduplication
@@ -349,6 +378,10 @@ def data_collection(
             query += " AND status = ?"
             params.append(filter_status)
 
+        if filter_source:
+            query += " AND source = ?"
+            params.append(filter_source)
+
         query += " ORDER BY created_at"
 
         if limit:
@@ -364,6 +397,7 @@ def data_collection(
             item_data = json.loads(row["data"])
             item_data["_id"] = row["id"]
             item_data["_status"] = row["status"]
+            item_data["_source"] = row["source"]
             item_data["_enriched_at"] = row["enriched_at"]
             items.append(item_data)
 
@@ -371,7 +405,8 @@ def data_collection(
             "collection": coll["name"],
             "items": items,
             "count": len(items),
-            "filter_status": filter_status
+            "filter_status": filter_status,
+            "filter_source": filter_source
         }
 
     elif action == "update_status":
@@ -869,41 +904,42 @@ def update_collection_item(
 def batch_next(
     collection_name: str = None,
     collection_id: str = None,
+    batch_size: int = 1,
     from_status: str = "pending",
     to_status: str = "processing",
     agent=None
 ) -> dict:
     """
-    Get the next item from a collection for processing.
+    Get the next item(s) from a collection for processing.
 
-    Atomically fetches one item and updates its status to prevent
-    double-processing. Use this in a loop for batch enrichment.
+    Atomically fetches item(s) and updates status to prevent double-processing.
+    Use batch_size > 1 for parallel processing.
 
     Args:
         collection_name: Collection name
         collection_id: Or collection ID
+        batch_size: Number of items to fetch (default: 1, max: 100)
         from_status: Only get items with this status (default: pending)
-        to_status: Update item to this status (default: processing)
+        to_status: Update items to this status (default: processing)
 
     Returns:
-        Item data with _id for tracking, or {"done": True} if no more items
+        - If batch_size=1: Single item dict with _id, or {"done": True}
+        - If batch_size>1: {"items": [...], "count": N, "done": False/True}
 
-    Example loop:
+    Example - Single item (sequential):
         while True:
             item = batch_next(collection_name="vc_list")
             if item.get("done"):
                 break
+            # Process item...
 
-            # Research this VC
-            research_result = web_search(query=f"{item['name']} VC investment focus")
-
-            # Update with findings
-            update_collection_item(
-                collection_name="vc_list",
-                item_id=item["_id"],
-                updates={"focus": research_result["summary"]},
-                status="enriched"
-            )
+    Example - Batch of 5 (parallel):
+        while True:
+            batch = batch_next(collection_name="vc_list", batch_size=5)
+            if batch.get("done"):
+                break
+            for item in batch["items"]:
+                # Process item (can be parallelized)...
     """
     conn = _get_research_db()
     cur = conn.cursor()
@@ -913,16 +949,19 @@ def batch_next(
     if not coll:
         return tool_error("Collection not found")
 
-    # Get next pending item
+    # Clamp batch_size
+    batch_size = max(1, min(batch_size, 100))
+
+    # Get next pending item(s)
     cur.execute("""
         SELECT * FROM collection_items
         WHERE collection_id = ? AND status = ?
         ORDER BY created_at
-        LIMIT 1
-    """, (coll["id"], from_status))
+        LIMIT ?
+    """, (coll["id"], from_status, batch_size))
 
-    row = cur.fetchone()
-    if not row:
+    rows = cur.fetchall()
+    if not rows:
         # Get stats
         cur.execute("""
             SELECT status, COUNT(*) as count
@@ -939,18 +978,24 @@ def batch_next(
             "message": f"No more items with status '{from_status}'"
         }
 
-    # Update status atomically
-    cur.execute("""
+    # Update status for all fetched items atomically
+    item_ids = [row["id"] for row in rows]
+    placeholders = ",".join("?" * len(item_ids))
+    cur.execute(f"""
         UPDATE collection_items
         SET status = ?, updated_at = ?
-        WHERE id = ?
-    """, (to_status, now, row["id"]))
+        WHERE id IN ({placeholders})
+    """, [to_status, now] + item_ids)
     conn.commit()
 
-    # Return item data
-    item_data = json.loads(row["data"])
-    item_data["_id"] = row["id"]
-    item_data["_status"] = to_status
+    # Build items list
+    items = []
+    for row in rows:
+        item_data = json.loads(row["data"])
+        item_data["_id"] = row["id"]
+        item_data["_status"] = to_status
+        item_data["_source"] = row["source"]
+        items.append(item_data)
 
     # Add progress info
     cur.execute("""
@@ -962,15 +1007,28 @@ def batch_next(
     """, (coll["id"],))
     stats = cur.fetchone()
 
-    return {
-        **item_data,
-        "_progress": {
-            "total": stats["total"],
-            "enriched": stats["enriched"],
-            "pending": stats["pending"] - 1,  # This one is now processing
-            "percent": round((stats["enriched"] / stats["total"]) * 100, 1) if stats["total"] > 0 else 0
-        }
+    progress = {
+        "total": stats["total"],
+        "enriched": stats["enriched"],
+        "pending": stats["pending"],
+        "percent": round((stats["enriched"] / stats["total"]) * 100, 1) if stats["total"] > 0 else 0
     }
+
+    # Return format depends on batch_size
+    if batch_size == 1:
+        # Single item - backward compatible flat format
+        return {
+            **items[0],
+            "_progress": progress
+        }
+    else:
+        # Multiple items - return list
+        return {
+            "items": items,
+            "count": len(items),
+            "done": False,
+            "_progress": progress
+        }
 
 
 # ═══════════════════════════════════════════════════════════
@@ -1216,3 +1274,265 @@ def reset_collection_items(
         "to_status": to_status,
         "message": f"Reset {count} items to '{to_status}'"
     }
+
+
+# ═══════════════════════════════════════════════════════════
+# IMPORT COLLECTION - Bulk import from CSV or list
+# ═══════════════════════════════════════════════════════════
+
+
+@tool()
+def import_collection(
+    name: str,
+    csv_path: str = None,
+    items: list = None,
+    key_field: str = None,
+    source: str = None,
+    create_if_missing: bool = True,
+    agent=None
+) -> dict:
+    """
+    Bulk import data into a collection from CSV file or list of dicts.
+
+    For CRM pagination, importing existing data, or loading from files.
+    Auto-detects schema from first item if creating new collection.
+
+    Args:
+        name: Collection name
+        csv_path: Path to CSV file to import
+        items: List of dicts to import (alternative to csv_path)
+        key_field: Field for deduplication (required if creating new collection)
+        source: Source label for tracking (e.g., "csv_import", "hubspot_api")
+        create_if_missing: Create collection if it doesn't exist (default: True)
+
+    Example - Import from CSV:
+        import_collection(name="contacts", csv_path="~/Downloads/contacts.csv",
+                         key_field="email", source="csv_import")
+
+    Example - Import CRM page:
+        import_collection(name="contacts", items=crm_response["contacts"],
+                         key_field="email", source="hubspot_page_1")
+    """
+    conn = _get_research_db()
+    cur = conn.cursor()
+    now = datetime.now().isoformat()
+
+    # Load items from CSV if path provided
+    if csv_path:
+        csv_path = str(Path(csv_path).expanduser())
+        if not os.path.exists(csv_path):
+            return tool_error(f"CSV file not found: {csv_path}")
+
+        with open(csv_path, 'r', newline='', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            items = list(reader)
+
+        if not source:
+            source = f"csv:{Path(csv_path).name}"
+
+    if not items:
+        return tool_error("No items to import", fix="Provide csv_path or items")
+
+    # Check if collection exists
+    coll = _get_collection(cur, name)
+
+    if not coll:
+        if not create_if_missing:
+            return tool_error(f"Collection '{name}' not found",
+                            fix="Set create_if_missing=True or create collection first")
+
+        if not key_field:
+            return tool_error("key_field required when creating new collection")
+
+        # Auto-detect schema from first item
+        first_item = items[0]
+        schema = {k: "string" for k in first_item.keys()}
+
+        if key_field not in schema:
+            return tool_error(f"key_field '{key_field}' not found in data")
+
+        # Create collection
+        coll_id = str(uuid4())[:8]
+        cur.execute("""
+            INSERT INTO collections (id, name, schema, key_field, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (coll_id, name, json.dumps(schema), key_field, now, now))
+
+        coll = {"id": coll_id, "name": name, "key_field": key_field}
+        created_collection = True
+    else:
+        created_collection = False
+        key_field = coll["key_field"]
+
+    # Import items
+    added = 0
+    skipped = 0
+    errors = []
+
+    for itm in items:
+        if key_field not in itm:
+            errors.append(f"Missing key_field '{key_field}'")
+            continue
+
+        key_value = str(itm[key_field]).lower().strip()
+        item_id = str(uuid4())[:8]
+
+        try:
+            cur.execute("""
+                INSERT INTO collection_items (id, collection_id, key_value, data, source, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (item_id, coll["id"], key_value, json.dumps(itm), source, now, now))
+            added += 1
+        except sqlite3.IntegrityError:
+            skipped += 1
+
+    # Update collection count
+    cur.execute("""
+        UPDATE collections
+        SET item_count = (SELECT COUNT(*) FROM collection_items WHERE collection_id = ?),
+            updated_at = ?
+        WHERE id = ?
+    """, (coll["id"], now, coll["id"]))
+    conn.commit()
+
+    cur.execute("SELECT item_count FROM collections WHERE id = ?", (coll["id"],))
+    total = cur.fetchone()["item_count"]
+
+    result = {
+        "collection": name,
+        "created_collection": created_collection,
+        "imported": added,
+        "skipped_duplicates": skipped,
+        "total_items": total,
+        "source": source
+    }
+    if errors:
+        result["errors"] = errors[:10]  # Limit error messages
+        result["error_count"] = len(errors)
+
+    return result
+
+
+# ═══════════════════════════════════════════════════════════
+# CURSOR STATE - For API pagination (CRM, etc.)
+# ═══════════════════════════════════════════════════════════
+
+
+@tool()
+def cursor_state(
+    action: str,
+    name: str,
+    cursor_value: str = None,
+    page_number: int = None,
+    total_fetched: int = None,
+    has_more: bool = None,
+    metadata: dict = None,
+    agent=None
+) -> dict:
+    """
+    Manage pagination cursor state for APIs (CRM, etc.).
+
+    Use this to track position when paginating through large datasets.
+    Persists across restarts so you can resume where you left off.
+
+    Actions:
+    - save: Save current cursor/page state
+    - load: Load saved cursor state
+    - delete: Clear cursor state (when done)
+
+    Args:
+        action: save, load, delete
+        name: Cursor identifier (e.g., "hubspot_contacts", "salesforce_leads")
+        cursor_value: The cursor/token from API response
+        page_number: Current page number (for offset-based pagination)
+        total_fetched: Running total of items fetched
+        has_more: Whether more pages exist
+        metadata: Additional state to track (e.g., {"last_id": "abc123"})
+
+    Example - Cursor-based pagination (HubSpot style):
+        # Check for existing cursor
+        state = cursor_state(action="load", name="hubspot_contacts")
+
+        cursor = state.get("cursor_value") if state["found"] else None
+        while True:
+            response = hubspot.get_contacts(after=cursor)
+
+            # Import page
+            import_collection(name="contacts", items=response["results"],
+                            source=f"hubspot_page_{state.get('page_number', 0)}")
+
+            # Save cursor state
+            cursor_state(action="save", name="hubspot_contacts",
+                        cursor_value=response.get("paging", {}).get("next", {}).get("after"),
+                        page_number=state.get("page_number", 0) + 1,
+                        total_fetched=state.get("total_fetched", 0) + len(response["results"]),
+                        has_more=response.get("paging") is not None)
+
+            if not response.get("paging"):
+                break
+            cursor = response["paging"]["next"]["after"]
+
+        # Clean up when done
+        cursor_state(action="delete", name="hubspot_contacts")
+    """
+    conn = _get_research_db()
+    cur = conn.cursor()
+    now = datetime.now().isoformat()
+
+    if action == "save":
+        # Upsert cursor state
+        cur.execute("""
+            INSERT INTO cursor_states (id, name, cursor_value, page_number, total_fetched, has_more, metadata, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(name) DO UPDATE SET
+                cursor_value = excluded.cursor_value,
+                page_number = COALESCE(excluded.page_number, cursor_states.page_number),
+                total_fetched = COALESCE(excluded.total_fetched, cursor_states.total_fetched),
+                has_more = COALESCE(excluded.has_more, cursor_states.has_more),
+                metadata = COALESCE(excluded.metadata, cursor_states.metadata),
+                updated_at = excluded.updated_at
+        """, (
+            str(uuid4())[:8],
+            name,
+            cursor_value,
+            page_number,
+            total_fetched,
+            1 if has_more else 0 if has_more is not None else None,
+            json.dumps(metadata) if metadata else None,
+            now,
+            now
+        ))
+        conn.commit()
+
+        return {
+            "saved": name,
+            "cursor_value": cursor_value,
+            "page_number": page_number,
+            "total_fetched": total_fetched,
+            "has_more": has_more
+        }
+
+    elif action == "load":
+        cur.execute("SELECT * FROM cursor_states WHERE name = ?", (name,))
+        row = cur.fetchone()
+
+        if not row:
+            return {"found": False, "name": name}
+
+        return {
+            "found": True,
+            "name": name,
+            "cursor_value": row["cursor_value"],
+            "page_number": row["page_number"],
+            "total_fetched": row["total_fetched"],
+            "has_more": bool(row["has_more"]),
+            "metadata": json.loads(row["metadata"]) if row["metadata"] else None,
+            "updated_at": row["updated_at"]
+        }
+
+    elif action == "delete":
+        cur.execute("DELETE FROM cursor_states WHERE name = ?", (name,))
+        conn.commit()
+        return {"deleted": name}
+
+    return tool_error(f"Unknown action: {action}")
