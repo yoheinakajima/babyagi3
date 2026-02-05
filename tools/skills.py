@@ -430,6 +430,9 @@ def _composio_setup_tool(agent: "Agent", Tool: type) -> "Tool":
             For OAuth apps, uses Composio's managed OAuth (no client credentials needed).
             For API key apps, creates a custom auth config with provided credentials.
             """
+            import os
+            import httpx
+
             toolkit = toolkit_name.upper()
 
             # Check if we have a stored auth config
@@ -438,63 +441,139 @@ def _composio_setup_tool(agent: "Agent", Tool: type) -> "Tool":
                 if stored:
                     return stored["auth_config_id"]
 
-            # Try to create one programmatically
+            # Try SDK method first
             try:
                 auth_configs = getattr(client, "auth_configs", None)
-                if not auth_configs:
-                    return None
+                if auth_configs:
+                    if custom_credentials:
+                        if "api_key" in custom_credentials:
+                            auth_scheme = "API_KEY"
+                        elif "token" in custom_credentials:
+                            auth_scheme = "BEARER_TOKEN"
+                        elif "username" in custom_credentials and "password" in custom_credentials:
+                            auth_scheme = "BASIC"
+                        else:
+                            auth_scheme = "API_KEY"
 
-                if custom_credentials:
-                    # API key / custom auth
-                    # Determine auth scheme from credentials
-                    if "api_key" in custom_credentials:
-                        auth_scheme = "API_KEY"
-                    elif "token" in custom_credentials:
-                        auth_scheme = "BEARER_TOKEN"
-                    elif "username" in custom_credentials and "password" in custom_credentials:
-                        auth_scheme = "BASIC"
+                        config = auth_configs.create(
+                            toolkit=toolkit,
+                            options={
+                                "type": "use_custom_auth",
+                                "auth_scheme": auth_scheme,
+                                "credentials": custom_credentials,
+                            }
+                        )
                     else:
-                        auth_scheme = "API_KEY"  # Default
+                        config = auth_configs.create(
+                            toolkit=toolkit,
+                            options={"type": "use_composio_managed_auth"}
+                        )
 
-                    config = auth_configs.create(
-                        toolkit=toolkit,
-                        options={
-                            "type": "use_custom_auth",
-                            "auth_scheme": auth_scheme,
-                            "credentials": custom_credentials,
+                    auth_config_id = getattr(config, "id", None) or getattr(config, "auth_config_id", None)
+                    if auth_config_id:
+                        if ag.memory:
+                            ag.memory.store.save_composio_auth_config(
+                                toolkit=toolkit,
+                                auth_config_id=auth_config_id,
+                                auth_type="custom" if custom_credentials else "managed",
+                            )
+                        return auth_config_id
+            except Exception:
+                pass
+
+            # Fallback: Try REST API to create auth config
+            api_key = os.environ.get("COMPOSIO_API_KEY", "")
+            if api_key:
+                try:
+                    payload = {
+                        "toolkit": toolkit,
+                        "type": "use_composio_managed_auth" if not custom_credentials else "use_custom_auth",
+                    }
+                    if custom_credentials:
+                        if "api_key" in custom_credentials:
+                            payload["auth_scheme"] = "API_KEY"
+                        elif "token" in custom_credentials:
+                            payload["auth_scheme"] = "BEARER_TOKEN"
+                        payload["credentials"] = custom_credentials
+
+                    response = httpx.post(
+                        "https://backend.composio.dev/api/v1/auth-configs",
+                        headers={"x-api-key": api_key, "Content-Type": "application/json"},
+                        json=payload,
+                        timeout=30,
+                    )
+                    if response.status_code in (200, 201):
+                        data = response.json()
+                        auth_config_id = data.get("id") or data.get("auth_config_id")
+                        if auth_config_id and ag.memory:
+                            ag.memory.store.save_composio_auth_config(
+                                toolkit=toolkit,
+                                auth_config_id=auth_config_id,
+                                auth_type="custom" if custom_credentials else "managed",
+                            )
+                        return auth_config_id
+                except Exception:
+                    pass
+
+            return None
+
+        def _list_connected_accounts(uid: str) -> list:
+            """Helper to list connected accounts with SDK compatibility."""
+            try:
+                # SDK 0.11+: positional argument
+                return list(client.connected_accounts.list(uid))
+            except TypeError:
+                try:
+                    # Older SDK: keyword argument
+                    return list(client.connected_accounts.list(user_id=uid))
+                except TypeError:
+                    # Even older: entity_ids
+                    return list(client.connected_accounts.list(entity_ids=[uid]))
+
+        def _list_apps_via_api() -> list[dict]:
+            """List apps via REST API since SDK doesn't expose apps.list()."""
+            import os
+            import httpx
+
+            api_key = os.environ.get("COMPOSIO_API_KEY", "")
+            if not api_key:
+                return []
+
+            try:
+                response = httpx.get(
+                    "https://backend.composio.dev/api/v1/apps",
+                    headers={"x-api-key": api_key},
+                    timeout=30,
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    # Handle both array response and {items: [...]} response
+                    apps = data if isinstance(data, list) else data.get("items", data.get("apps", []))
+                    return [
+                        {
+                            "name": app.get("name", ""),
+                            "key": app.get("key", app.get("name", "")),
+                            "description": app.get("description", ""),
                         }
-                    )
-                else:
-                    # Use Composio's managed OAuth
-                    config = auth_configs.create(
-                        toolkit=toolkit,
-                        options={
-                            "type": "use_composio_managed_auth",
-                        }
-                    )
-
-                auth_config_id = getattr(config, "id", None) or getattr(config, "auth_config_id", None)
-                if auth_config_id and ag.memory:
-                    # Store for future use
-                    ag.memory.store.save_composio_auth_config(
-                        toolkit=toolkit,
-                        auth_config_id=auth_config_id,
-                        auth_type="custom" if custom_credentials else "managed",
-                    )
-                return auth_config_id
-
-            except Exception as e:
-                # Log but don't fail - some apps might work without explicit auth config
-                return None
+                        for app in apps
+                    ]
+            except Exception:
+                pass
+            return []
 
         # ═══════════════════════════════════════════════════════════════════
         # LIST_APPS - Show all available Composio apps
         # ═══════════════════════════════════════════════════════════════════
         if action == "list_apps":
             try:
-                apps = client.apps.list()
+                apps = _list_apps_via_api()
+                if not apps:
+                    return {
+                        "error": "Could not list apps. Ensure COMPOSIO_API_KEY is set.",
+                        "suggestion": "Set COMPOSIO_API_KEY environment variable or visit https://composio.dev/toolkits for available apps.",
+                    }
                 return {
-                    "apps": [{"name": a.name, "key": getattr(a, 'key', a.name), "description": a.description} for a in apps],
+                    "apps": apps,
                     "count": len(apps),
                 }
             except Exception as e:
@@ -526,19 +605,41 @@ def _composio_setup_tool(agent: "Agent", Tool: type) -> "Tool":
             if not app:
                 return {"error": "app parameter required for get_auth_params"}
             try:
-                # Get app details to understand auth requirements
-                apps = client.apps.list()
+                # Get app details via REST API
+                import os
+                import httpx
+
+                api_key = os.environ.get("COMPOSIO_API_KEY", "")
+                auth_schemes = None
                 target_app = None
-                for a in apps:
-                    if a.name.upper() == app.upper() or getattr(a, 'key', '').upper() == app.upper():
-                        target_app = a
-                        break
+
+                if api_key:
+                    try:
+                        # Get specific app details
+                        response = httpx.get(
+                            f"https://backend.composio.dev/api/v1/apps/{app.upper()}",
+                            headers={"x-api-key": api_key},
+                            timeout=30,
+                        )
+                        if response.status_code == 200:
+                            target_app = response.json()
+                            auth_schemes = target_app.get("auth_schemes") or target_app.get("authSchemes")
+                    except Exception:
+                        pass
 
                 if not target_app:
-                    return {"error": f"App '{app}' not found. Use list_apps to see available apps."}
-
-                # Try to get auth schemes from the app
-                auth_schemes = getattr(target_app, 'auth_schemes', None) or getattr(target_app, 'authSchemes', None)
+                    # App not found or API error - provide generic OAuth guidance
+                    return {
+                        "app": app,
+                        "auth_type": "oauth2",
+                        "expected_params": [{
+                            "type": "oauth2",
+                            "message": "Use connect action to initiate OAuth flow",
+                            "flow": "connect"
+                        }],
+                        "instructions": _get_auth_instructions("oauth2", app, []),
+                        "note": "Could not fetch app details. Assuming OAuth flow."
+                    }
 
                 # Get expected parameters (what credentials the user needs to provide)
                 expected_params = []
@@ -622,13 +723,7 @@ def _composio_setup_tool(agent: "Agent", Tool: type) -> "Tool":
         # ═══════════════════════════════════════════════════════════════════
         elif action == "check_connections":
             try:
-                # Get connections from Composio API (new SDK uses user_id)
-                try:
-                    # Try new SDK method first
-                    connected_accounts = client.connected_accounts.list(user_id=user_id)
-                except TypeError:
-                    # Fall back to old method if SDK version is mixed
-                    connected_accounts = client.connected_accounts.list(entity_ids=[user_id])
+                connected_accounts = _list_connected_accounts(user_id)
 
                 connections = []
                 for account in connected_accounts:
@@ -681,10 +776,7 @@ def _composio_setup_tool(agent: "Agent", Tool: type) -> "Tool":
                 # Check if already connected (unless account_label specified for new account)
                 if not account_label:
                     try:
-                        try:
-                            connected_accounts = client.connected_accounts.list(user_id=user_id)
-                        except TypeError:
-                            connected_accounts = client.connected_accounts.list(entity_ids=[user_id])
+                        connected_accounts = _list_connected_accounts(user_id)
                         for account in connected_accounts:
                             acc_app = getattr(account, 'app_name', None) or getattr(account, 'appName', None) or getattr(account, 'toolkit', '')
                             acc_status = getattr(account, 'status', '')
@@ -699,33 +791,38 @@ def _composio_setup_tool(agent: "Agent", Tool: type) -> "Tool":
                     except Exception:
                         pass  # Continue with connection attempt
 
-                # Get or create auth_config_id (required for new SDK)
+                # Get or create auth_config_id (required for SDK 0.10+)
                 auth_config_id = get_or_create_auth_config(app, credentials if credentials else None)
+
+                if not auth_config_id:
+                    return {
+                        "error": f"Could not create auth config for {app}",
+                        "suggestion": (
+                            f"Create an auth config manually in the Composio dashboard at https://app.composio.dev, "
+                            f"then store it with: composio_setup(action='status') to verify. "
+                            f"Alternatively, ensure COMPOSIO_API_KEY is set correctly."
+                        ),
+                    }
 
                 # If credentials provided (for API key / bearer token auth)
                 if credentials:
                     try:
-                        # New SDK: use auth_config_id + user_id
-                        initiate_params = {"user_id": user_id}
-                        if auth_config_id:
-                            initiate_params["auth_config_id"] = auth_config_id
-
-                        # For API key auth, we may need to pass config
+                        initiate_params = {
+                            "user_id": user_id,
+                            "auth_config_id": auth_config_id,
+                        }
+                        # Pass credentials as config
                         if "api_key" in credentials:
                             initiate_params["config"] = {"api_key": credentials["api_key"]}
                         elif "token" in credentials:
                             initiate_params["config"] = {"token": credentials["token"]}
+                        elif "username" in credentials:
+                            initiate_params["config"] = {
+                                "username": credentials["username"],
+                                "password": credentials.get("password", ""),
+                            }
 
-                        try:
-                            connection = client.connected_accounts.initiate(**initiate_params)
-                        except TypeError:
-                            # Fallback for older SDK
-                            connection = client.connected_accounts.initiate(
-                                app=app,
-                                entity_id=user_id,
-                                auth_config={"credentials": credentials}
-                            )
-
+                        connection = client.connected_accounts.initiate(**initiate_params)
                         conn_id = getattr(connection, 'id', None) or getattr(connection, 'connectedAccountId', None) or getattr(connection, 'connectionId', None)
 
                         # Store connection locally
@@ -758,18 +855,10 @@ def _composio_setup_tool(agent: "Agent", Tool: type) -> "Tool":
 
                 # OAuth flow - initiate connection with auth_config_id
                 try:
-                    initiate_params = {"user_id": user_id}
-                    if auth_config_id:
-                        initiate_params["auth_config_id"] = auth_config_id
-
-                    try:
-                        connection = client.connected_accounts.initiate(**initiate_params)
-                    except TypeError:
-                        # Fallback for older SDK
-                        connection = client.connected_accounts.initiate(
-                            app=app,
-                            entity_id=user_id,
-                        )
+                    connection = client.connected_accounts.initiate(
+                        user_id=user_id,
+                        auth_config_id=auth_config_id,
+                    )
                 except Exception as init_error:
                     return {
                         "error": f"Failed to initiate OAuth for {app}: {init_error}",
@@ -824,7 +913,11 @@ def _composio_setup_tool(agent: "Agent", Tool: type) -> "Tool":
                 # If we have connection_id, check it directly
                 if connection_id:
                     try:
-                        account = client.connected_accounts.get(id=connection_id)
+                        # SDK 0.11+: positional argument
+                        try:
+                            account = client.connected_accounts.get(connection_id)
+                        except TypeError:
+                            account = client.connected_accounts.get(id=connection_id)
                         status = str(getattr(account, 'status', 'unknown')).upper()
 
                         if status == 'ACTIVE':
@@ -866,10 +959,7 @@ def _composio_setup_tool(agent: "Agent", Tool: type) -> "Tool":
 
                 # Otherwise, check by app name
                 if app:
-                    try:
-                        connected_accounts = client.connected_accounts.list(user_id=user_id)
-                    except TypeError:
-                        connected_accounts = client.connected_accounts.list(entity_ids=[user_id])
+                    connected_accounts = _list_connected_accounts(user_id)
 
                     for account in connected_accounts:
                         acc_app = getattr(account, 'app_name', None) or getattr(account, 'appName', None) or getattr(account, 'toolkit', '')
@@ -928,10 +1018,7 @@ def _composio_setup_tool(agent: "Agent", Tool: type) -> "Tool":
                 # First check if the app is connected
                 is_connected = False
                 try:
-                    try:
-                        connected_accounts = client.connected_accounts.list(user_id=user_id)
-                    except TypeError:
-                        connected_accounts = client.connected_accounts.list(entity_ids=[user_id])
+                    connected_accounts = _list_connected_accounts(user_id)
                     for account in connected_accounts:
                         acc_app = getattr(account, 'app_name', None) or getattr(account, 'appName', None) or getattr(account, 'toolkit', '')
                         acc_status = getattr(account, 'status', '')
@@ -1041,10 +1128,7 @@ def _composio_setup_tool(agent: "Agent", Tool: type) -> "Tool":
             # Also get connection status from Composio
             connections = []
             try:
-                try:
-                    connected_accounts = client.connected_accounts.list(user_id=user_id)
-                except TypeError:
-                    connected_accounts = client.connected_accounts.list(entity_ids=[user_id])
+                connected_accounts = _list_connected_accounts(user_id)
                 for account in connected_accounts:
                     connections.append({
                         "app": getattr(account, 'app_name', None) or getattr(account, 'appName', None) or getattr(account, 'toolkit', 'unknown'),
