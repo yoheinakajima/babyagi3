@@ -153,7 +153,7 @@ ANTHROPIC_DEFAULTS = {
     "agent": "claude-sonnet-4-20250514",         # Main agent operations
     "memory": "claude-sonnet-4-20250514",        # Memory extraction/summaries
     "fast": "claude-3-5-haiku-20241022",         # Quick/cheap operations
-    "embedding": "text-embedding-3-small",       # OpenAI embeddings (or local fallback)
+    "embedding": "local",                        # Use local embeddings (no API key required)
 }
 
 # Default models for OpenAI (when OPENAI_API_KEY is set)
@@ -311,6 +311,15 @@ def create_default_config() -> LLMConfig:
     provider = get_available_provider()
     models = get_default_models_for_provider(provider)
 
+    # Smart embedding model selection based on available API keys
+    if provider == "openai":
+        embedding_model = "text-embedding-3-small"
+    elif provider == "anthropic":
+        # Anthropic doesn't provide embeddings; use local or voyage
+        embedding_model = "local"
+    else:
+        embedding_model = "local"
+
     return LLMConfig(
         skill_building_model=ModelConfig(model_id=models["skill_building"], max_tokens=16384),
         coding_model=ModelConfig(model_id=models["coding"], max_tokens=8096),
@@ -318,7 +327,7 @@ def create_default_config() -> LLMConfig:
         agent_model=ModelConfig(model_id=models["agent"], max_tokens=8096),
         memory_model=ModelConfig(model_id=models["memory"], max_tokens=2048),
         fast_model=ModelConfig(model_id=models["fast"], max_tokens=1024),
-        embedding_model="text-embedding-3-small" if provider == "openai" else "text-embedding-3-small",
+        embedding_model=embedding_model,
         embedding_provider=provider if provider != "none" else "local",
     )
 

@@ -1,10 +1,20 @@
 """
 Embedding generation utilities for the memory system.
 
-Supports multiple embedding providers via LiteLLM:
-- OpenAI embeddings (text-embedding-3-small, etc.)
-- Local models (sentence-transformers)
-- Voyage AI embeddings
+Supports multiple embedding providers with smart selection:
+- OpenAI embeddings (text-embedding-3-small, etc.) - requires OPENAI_API_KEY
+- Voyage AI embeddings - Anthropic's recommended provider, requires VOYAGE_API_KEY
+- Local models (sentence-transformers) - no API key required, used as fallback
+
+Provider selection logic:
+1. If embedding_model is "local" → use LocalEmbeddings
+2. If embedding_model is OpenAI model + OPENAI_API_KEY exists → use LiteLLM/OpenAI
+3. If VOYAGE_API_KEY exists → use Voyage
+4. Fallback to LocalEmbeddings (sentence-transformers)
+5. Final fallback to MockEmbeddings
+
+Note: Anthropic (Claude) does not provide embedding models.
+When using ANTHROPIC_API_KEY only, the system will use local embeddings.
 
 Includes caching and graceful fallback.
 """
@@ -478,8 +488,18 @@ def _create_provider() -> EmbeddingProvider:
     except ImportError:
         pass
 
-    # Try LiteLLM first (supports multiple providers via single interface)
-    if os.environ.get("OPENAI_API_KEY") or os.environ.get("ANTHROPIC_API_KEY"):
+    # If configured for local embeddings, skip API providers
+    if embedding_model == "local":
+        try:
+            provider = LocalEmbeddings()
+            provider.model  # Test
+            return provider
+        except Exception:
+            pass  # Fall through to other options
+
+    # Try LiteLLM only if we have the right API key for the model
+    # OpenAI embedding models require OPENAI_API_KEY
+    if embedding_model.startswith("text-embedding") and os.environ.get("OPENAI_API_KEY"):
         try:
             provider = LiteLLMEmbeddings(model=embedding_model)
             provider.client  # Test that it works
@@ -487,16 +507,16 @@ def _create_provider() -> EmbeddingProvider:
         except Exception:
             pass
 
-    # Fall back to direct OpenAI
+    # Fall back to direct OpenAI if key is available
     if os.environ.get("OPENAI_API_KEY"):
         try:
-            provider = OpenAIEmbeddings(model=embedding_model)
+            provider = OpenAIEmbeddings(model="text-embedding-3-small")
             provider.client  # This will raise if there's an issue
             return provider
         except Exception:
             pass
 
-    # Try Voyage
+    # Try Voyage (Anthropic's recommended embedding provider)
     if os.environ.get("VOYAGE_API_KEY"):
         try:
             provider = AnthropicVoyageEmbeddings()
@@ -505,7 +525,7 @@ def _create_provider() -> EmbeddingProvider:
         except Exception:
             pass
 
-    # Try local embeddings
+    # Try local embeddings as fallback (works without API key)
     try:
         provider = LocalEmbeddings()
         provider.model  # Test
@@ -513,7 +533,7 @@ def _create_provider() -> EmbeddingProvider:
     except Exception:
         pass
 
-    # Fall back to mock embeddings
+    # Fall back to mock embeddings (always works)
     return MockEmbeddings()
 
 
