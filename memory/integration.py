@@ -761,6 +761,10 @@ def create_extraction_background_task(memory, interval_seconds: int = 60):
         )
     """
     async def extraction_loop():
+        # Initial delay to allow system startup to complete
+        # Prevents API contention with CLI greeting and Uvicorn startup
+        await asyncio.sleep(5)
+
         while True:
             try:
                 # Get pending events
