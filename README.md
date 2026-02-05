@@ -38,6 +38,16 @@ This means the entire system reduces to: **a loop that processes messages and de
 - **Full-Featured Scheduler** — Cron expressions, intervals, one-time tasks with persistence
 - **Styled CLI Output** — Color-coded messages (user/agent/system) with verbose modes
 - **Event System** — UI-ready event emitter for tool calls, objectives, and tasks
+- **Unified Communication** — Send messages via any channel with `send_message` tool
+- **Owner vs External** — Context-aware responses based on message source
+- **YAML Configuration** — Easy channel setup with environment variable substitution
+- **Tool Health System** — Automatic detection of available tools and missing dependencies
+- **Extensible Channels** — Add new channels by implementing simple listener/sender patterns
+- **Tool Persistence** — Dynamically created tools survive restarts with health tracking
+- **Credential Storage** — Secure storage for accounts and payment methods with keyring integration
+
+### Previous (v0.2.0)
+
 - **Background Objectives** — Async work that runs while chat continues
 - **e2b Sandbox** — Safe code execution for dynamically created tools
 - **External Tools** — Web search, browser automation, email, secrets management
@@ -200,6 +210,50 @@ ScheduledTask {
   next_run_at: string
   last_run_at: string
   run_count: int
+}
+
+ToolDefinition {
+  id: string
+  name: string
+  description: string
+  source_code: string | None     # Python code for dynamic tools
+  parameters: json_schema
+  packages: list[str]            # Required packages
+  env: list[str]                 # Required env vars
+  category: string               # "core", "builtin", "custom"
+  is_enabled: bool
+  is_dynamic: bool               # False for built-in tools
+
+  # Execution tracking
+  usage_count: int
+  success_count: int
+  error_count: int
+  avg_duration_ms: float
+  last_used_at: datetime | None
+  last_error: string | None
+}
+
+Credential {
+  id: string
+  credential_type: string        # "account", "credit_card", "api_key"
+  service: string                # "github.com", "stripe.com"
+
+  # Account fields
+  username: string | None
+  email: string | None
+  password_ref: string | None    # Reference to keyring
+
+  # Credit card fields
+  card_last_four: string | None
+  card_type: string | None       # "visa", "mastercard", etc.
+  card_expiry: string | None
+  card_ref: string | None        # Reference to keyring
+  billing_name: string | None
+  billing_address: string | None
+
+  # Metadata
+  notes: string | None
+  last_used_at: datetime | None
 }
 ```
 
@@ -568,6 +622,64 @@ agent.run("Convert 100 Celsius to Fahrenheit")
 
 Tools that require external packages are automatically detected and sandboxed for safety.
 
+#### Tool Persistence
+
+Dynamically created tools are **automatically persisted** to the SQLite database and survive agent restarts:
+
+- **Storage**: Tools are saved in the `tool_definitions` table with full source code
+- **Auto-reload**: On startup, all persisted tools are automatically re-registered
+- **Smart execution**: Pure Python tools run locally (fast), tools with external packages use e2b sandbox (safe)
+
+```python
+# Create a tool - it's persisted automatically
+agent.run("Create a calculator tool that adds two numbers")
+
+# Restart the agent...
+agent = Agent()
+
+# Tool is still available!
+agent.run("Add 5 and 3")  # Works immediately
+```
+
+#### Tool Health Tracking
+
+Every tool execution is tracked with detailed metrics:
+
+```python
+ToolDefinition {
+    name: str                    # Tool name
+    description: str             # What it does
+    source_code: str             # Python code (for dynamic tools)
+    parameters: dict             # JSON schema
+
+    # Execution statistics
+    usage_count: int             # Total executions
+    success_count: int           # Successful runs
+    error_count: int             # Failed runs
+    avg_duration_ms: float       # Average execution time
+    last_used_at: datetime       # Last execution timestamp
+    last_error: str              # Most recent error message
+
+    # Health indicators
+    success_rate: float          # Computed: success_count / usage_count
+    is_healthy: bool             # True if error rate < 50%
+}
+```
+
+**Monitoring tool health:**
+
+```python
+# The agent can check tool health
+agent.run("Which of my tools have been failing?")
+agent.run("Show me usage statistics for my tools")
+
+# Programmatic access
+from memory import MemoryStore
+store = MemoryStore()
+unhealthy = store.get_unhealthy_tools()  # Tools with high error rates
+problematic = store.get_problematic_tools()  # Tools needing attention
+```
+
 ### Skills Tool
 
 Skills are behavioral instructions stored as SKILL.md files. Unlike executable tools that run code, skills provide guidance that the AI follows.
@@ -736,7 +848,11 @@ agent.run("Sign up for service X and wait for the verification email")
 
 ### Secrets Management
 
-Securely store and retrieve API keys using system keyring.
+BabyAGI provides a **two-layer security model** for storing sensitive data:
+
+#### Layer 1: API Keys and Secrets
+
+Securely store and retrieve API keys using system keyring with automatic fallback to encrypted file storage.
 
 ```python
 # Store a secret
@@ -748,6 +864,57 @@ agent.run("What API keys do I have stored?")
 # Secrets are automatically retrieved when needed
 agent.run("Use my GitHub token to check my repositories")
 ```
+
+**Storage backends (checked in order):**
+1. **Environment variables** — checked first for immediate access
+2. **System keyring** — OS-level encryption (macOS Keychain, Windows Credential Locker, Linux Secret Service)
+3. **Encrypted file fallback** — uses `keyrings.cryptfile` if system keyring unavailable
+
+**Security features:**
+- Values are always masked in output (e.g., `sk-x...2024`)
+- Batch validation with `check_required_secrets()`
+- Interactive prompts via `request_api_key()` when keys are missing
+
+#### Layer 2: Credential Storage (Accounts & Payment Methods)
+
+Store complete account credentials and payment methods with a split storage architecture:
+
+- **Metadata** (in SQLite) — service names, usernames, emails, card last-4, billing info
+- **Sensitive data** (in Keyring only) — passwords, full card numbers, CVVs
+
+```python
+# Store an account
+agent.run("Store my login for github.com: username is 'myuser', password is 'secret123'")
+
+# Store a credit card
+agent.run("Store my Visa card ending in 4242 for online purchases")
+
+# List all credentials (sensitive data masked)
+agent.run("What accounts do I have stored?")
+
+# Search credentials
+agent.run("Find my credentials for anything related to AWS")
+
+# Retrieve with secrets (explicit request required)
+agent.run("Get my github.com password - I need to log in")
+```
+
+**Credential types supported:**
+
+| Type | Metadata Stored | Secrets in Keyring |
+|------|-----------------|-------------------|
+| `account` | service, username, email | password |
+| `credit_card` | last 4 digits, card type, expiry, billing address | full card number, CVV |
+| `api_key` | service name, description | API key value |
+
+See the `Credential` model in [The Data Model](#the-data-model) section for the full schema.
+
+**Security guarantees:**
+- Passwords are **never** stored in the database
+- Card numbers only stored as last 4 digits in DB — full number in keyring
+- All sensitive data encrypted at rest via OS keyring
+- Explicit `include_secrets=True` flag required to retrieve sensitive data
+- Card types auto-detected from number patterns (Visa, MasterCard, Amex, Discover, UnionPay)
 
 ## Configuration
 
@@ -1120,15 +1287,14 @@ agent = Agent(load_tools=False)  # Only core tools loaded
 
 ### Persistent Storage
 
-Swap the in-memory lists for a database:
+BabyAGI uses SQLite for all persistent data by default:
 
-```python
-# In production, replace MEMORIES and NOTES with:
-# - SQLite for simplicity
-# - PostgreSQL for scale
-# - Redis for speed
-# - Vector DB for semantic search
-```
+- **Tool definitions** — Dynamic tools stored in `tool_definitions` table
+- **Credentials** — Account metadata in `credentials` table (secrets in keyring)
+- **Scheduled tasks** — Stored in `~/.babyagi/scheduler/tasks.json`
+- **Memory/Events** — Stored in SQLite with the memory system
+
+For production scaling, you can swap SQLite for PostgreSQL or add Redis caching.
 
 ## Tool Health System
 
@@ -1169,6 +1335,7 @@ summary = get_health_summary()
 | **Safe extensibility** | Dynamic tools sandboxed, skills safety-scanned |
 | **Graceful degradation** | Missing packages/APIs degrade functionality but don't crash |
 | **Persistence** | Tools, skills, and scheduled tasks survive restarts |
+| **Secure by default** | Credentials split between DB metadata and keyring secrets |
 
 ### The Entire System
 
@@ -1232,8 +1399,8 @@ tools/
 ├── skills.py (skills, Composio, workflows)
 ├── web.py (search, browse, fetch)
 ├── email.py (AgentMail tools)
-├── secrets.py (secure key storage)
-├── credentials.py (credential management)
+├── secrets.py (API key storage)
+├── credentials.py (account & payment storage)
 ├── metrics.py (cost tracking tools)
 └── verbose.py (verbosity control)
 
