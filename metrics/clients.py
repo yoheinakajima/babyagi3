@@ -798,13 +798,13 @@ class InstrumentedLiteLLMEmbeddings:
 
 
 def get_llm_client(
-    use_case: Literal["coding", "research", "agent", "memory", "fast"] = "agent"
+    use_case: Literal["skill_building", "coding", "research", "agent", "memory", "fast"] = "agent"
 ) -> InstrumentedLiteLLM:
     """
     Get an instrumented LLM client configured for a specific use case.
 
     Args:
-        use_case: One of 'coding', 'research', 'agent', 'memory', 'fast'
+        use_case: One of 'skill_building', 'coding', 'research', 'agent', 'memory', 'fast'
 
     Returns:
         Configured InstrumentedLiteLLM client
@@ -814,6 +814,7 @@ def get_llm_client(
         config = get_llm_config()
 
         model_map = {
+            "skill_building": config.skill_building_model.model_id,
             "coding": config.coding_model.model_id,
             "research": config.research_model.model_id,
             "agent": config.agent_model.model_id,
@@ -828,13 +829,13 @@ def get_llm_client(
 
 
 def get_model_for_use_case(
-    use_case: Literal["coding", "research", "agent", "memory", "fast"] = "agent"
+    use_case: Literal["skill_building", "coding", "research", "agent", "memory", "fast"] = "agent"
 ) -> str:
     """
     Get the model ID configured for a specific use case.
 
     Args:
-        use_case: One of 'coding', 'research', 'agent', 'memory', 'fast'
+        use_case: One of 'skill_building', 'coding', 'research', 'agent', 'memory', 'fast'
 
     Returns:
         Model ID string
@@ -844,6 +845,7 @@ def get_model_for_use_case(
         config = get_llm_config()
 
         model_map = {
+            "skill_building": config.skill_building_model.model_id,
             "coding": config.coding_model.model_id,
             "research": config.research_model.model_id,
             "agent": config.agent_model.model_id,
@@ -855,6 +857,7 @@ def get_model_for_use_case(
     except ImportError:
         # Fallback defaults
         defaults = {
+            "skill_building": "claude-opus-4-20250514",
             "coding": "claude-sonnet-4-20250514",
             "research": "claude-sonnet-4-20250514",
             "agent": "claude-sonnet-4-20250514",

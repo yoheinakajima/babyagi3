@@ -8,6 +8,7 @@ This module provides:
 - Instrumented clients for metrics tracking
 
 Use cases:
+- skill_building_model: Most powerful model for complex skill/tool creation
 - coding_model: Powerful model for code generation and analysis
 - research_model: Model for research and information synthesis
 - agent_model: General agent operations
@@ -146,16 +147,18 @@ def check_llm_configuration() -> None:
 
 # Default models for Anthropic (when ANTHROPIC_API_KEY is set)
 ANTHROPIC_DEFAULTS = {
-    "coding": "claude-sonnet-4-20250514",      # Best for code generation
-    "research": "claude-sonnet-4-20250514",    # Good for research/analysis
-    "agent": "claude-sonnet-4-20250514",       # Main agent operations
-    "memory": "claude-sonnet-4-20250514",      # Memory extraction/summaries
-    "fast": "claude-3-5-haiku-20241022",       # Quick/cheap operations
-    "embedding": "text-embedding-3-small",     # OpenAI embeddings (or local fallback)
+    "skill_building": "claude-opus-4-20250514",  # Most powerful for complex skill creation
+    "coding": "claude-sonnet-4-20250514",        # Best for code generation
+    "research": "claude-sonnet-4-20250514",      # Good for research/analysis
+    "agent": "claude-sonnet-4-20250514",         # Main agent operations
+    "memory": "claude-sonnet-4-20250514",        # Memory extraction/summaries
+    "fast": "claude-3-5-haiku-20241022",         # Quick/cheap operations
+    "embedding": "text-embedding-3-small",       # OpenAI embeddings (or local fallback)
 }
 
 # Default models for OpenAI (when OPENAI_API_KEY is set)
 OPENAI_DEFAULTS = {
+    "skill_building": "o1",       # Most powerful for complex skill creation (reasoning model)
     "coding": "gpt-4o",           # Best for code generation
     "research": "gpt-4o",         # Good for research/analysis
     "agent": "gpt-4o",            # Main agent operations
@@ -195,7 +198,8 @@ class LLMConfig:
     Configuration for all LLM models used in the system.
 
     Different use cases can use different models:
-    - coding: Powerful model for code generation (e.g., Claude Opus, GPT-4o)
+    - skill_building: Most powerful model for complex skill/tool creation (e.g., Claude Opus 4, o1)
+    - coding: Powerful model for code generation (e.g., Claude Sonnet, GPT-4o)
     - research: Model for research tasks (e.g., Claude Sonnet, GPT-4o)
     - agent: Main agent operations (e.g., Claude Sonnet, GPT-4o)
     - memory: Memory operations like extraction, summaries (e.g., Claude Sonnet, GPT-4o-mini)
@@ -203,6 +207,12 @@ class LLMConfig:
     """
 
     # Model configurations for different use cases
+    skill_building_model: ModelConfig = field(default_factory=lambda: ModelConfig(
+        model_id=ANTHROPIC_DEFAULTS["skill_building"],
+        max_tokens=16384,  # Higher token limit for complex skill generation
+        temperature=0.0,
+    ))
+
     coding_model: ModelConfig = field(default_factory=lambda: ModelConfig(
         model_id=ANTHROPIC_DEFAULTS["coding"],
         max_tokens=8096,
@@ -247,6 +257,7 @@ class LLMConfig:
         defaults = get_default_models_for_provider(provider)
 
         instance = cls(
+            skill_building_model=ModelConfig(model_id=defaults["skill_building"], max_tokens=16384),
             coding_model=ModelConfig(model_id=defaults["coding"], max_tokens=8096),
             research_model=ModelConfig(model_id=defaults["research"], max_tokens=4096),
             agent_model=ModelConfig(model_id=defaults["agent"], max_tokens=8096),
@@ -257,6 +268,8 @@ class LLMConfig:
         )
 
         # Override with config values if provided
+        if "skill_building_model" in llm_config:
+            instance.skill_building_model = cls._parse_model_config(llm_config["skill_building_model"])
         if "coding_model" in llm_config:
             instance.coding_model = cls._parse_model_config(llm_config["coding_model"])
         if "research_model" in llm_config:
@@ -299,6 +312,7 @@ def create_default_config() -> LLMConfig:
     models = get_default_models_for_provider(provider)
 
     return LLMConfig(
+        skill_building_model=ModelConfig(model_id=models["skill_building"], max_tokens=16384),
         coding_model=ModelConfig(model_id=models["coding"], max_tokens=8096),
         research_model=ModelConfig(model_id=models["research"], max_tokens=4096),
         agent_model=ModelConfig(model_id=models["agent"], max_tokens=8096),
@@ -451,13 +465,13 @@ class LiteLLMClient:
 
 
 def get_client_for_use_case(
-    use_case: Literal["coding", "research", "agent", "memory", "fast"]
+    use_case: Literal["skill_building", "coding", "research", "agent", "memory", "fast"]
 ) -> LiteLLMClient:
     """
     Get a LiteLLM client configured for a specific use case.
 
     Args:
-        use_case: One of 'coding', 'research', 'agent', 'memory', 'fast'
+        use_case: One of 'skill_building', 'coding', 'research', 'agent', 'memory', 'fast'
 
     Returns:
         Configured LiteLLMClient
@@ -465,6 +479,7 @@ def get_client_for_use_case(
     config = get_llm_config()
 
     model_map = {
+        "skill_building": config.skill_building_model,
         "coding": config.coding_model,
         "research": config.research_model,
         "agent": config.agent_model,
