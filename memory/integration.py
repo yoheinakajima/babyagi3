@@ -761,16 +761,29 @@ def create_extraction_background_task(memory, interval_seconds: int = 60):
         )
     """
     async def extraction_loop():
+        # Initial delay to allow system startup to complete
+        # Prevents API contention with CLI greeting and Uvicorn startup
+        await asyncio.sleep(5)
+
+        # Semaphore to limit concurrent API calls (prevents overwhelming the API)
+        semaphore = asyncio.Semaphore(3)  # Max 3 concurrent extractions
+
+        async def extract_with_limit(event):
+            """Extract from event with rate limiting."""
+            async with semaphore:
+                try:
+                    await memory.extract_from_event(event)
+                except Exception as e:
+                    print(f"Extraction failed for event {event.id}: {e}")
+
         while True:
             try:
                 # Get pending events
                 events = memory.store.get_pending_extraction_events(limit=10)
 
-                for event in events:
-                    try:
-                        await memory.extract_from_event(event)
-                    except Exception as e:
-                        print(f"Extraction failed for event {event.id}: {e}")
+                # Process events in parallel (with rate limiting via semaphore)
+                if events:
+                    await asyncio.gather(*[extract_with_limit(e) for e in events])
 
                 # Refresh stale summaries
                 await memory.refresh_stale_summaries(threshold=10)
