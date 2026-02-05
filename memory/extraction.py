@@ -9,7 +9,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime
 
-from metrics import InstrumentedAnthropic, track_source
+from metrics import LiteLLMAnthropicAdapter, track_source, get_model_for_use_case
 from .embeddings import get_embedding
 from .models import (
     Event,
@@ -52,10 +52,20 @@ class ExtractionPipeline:
 
     @property
     def client(self):
-        """Get instrumented Anthropic client for metrics tracking."""
+        """Get instrumented LLM client for metrics tracking (supports multiple providers)."""
         if self._client is None:
-            self._client = InstrumentedAnthropic()
+            self._client = LiteLLMAnthropicAdapter()
         return self._client
+
+    @property
+    def model(self) -> str:
+        """Get the configured model for memory operations."""
+        return get_model_for_use_case("memory")
+
+    @property
+    def fast_model(self) -> str:
+        """Get the configured fast model for quick classification tasks."""
+        return get_model_for_use_case("fast")
 
     async def extract(self, event: Event) -> ExtractionResult:
         """
@@ -297,7 +307,7 @@ Extract entities, relationships, and topics from this event."""
 
         with track_source("extraction"):
             response = self.client.messages.create(
-                model="claude-sonnet-4-20250514",
+                model=self.model,
                 max_tokens=2048,
                 system=system_prompt,
                 messages=[{"role": "user", "content": user_message}],
@@ -628,7 +638,7 @@ Respond with only the category name, nothing else."""
         try:
             with track_source("extraction"):
                 response = self.client.messages.create(
-                    model="claude-haiku-3-5-20241022",
+                    model=self.fast_model,
                     max_tokens=20,
                     messages=[{"role": "user", "content": prompt}],
                 )
@@ -675,7 +685,7 @@ Respond with only the category name, nothing else."""
         try:
             with track_source("extraction"):
                 response = self.client.messages.create(
-                    model="claude-haiku-3-5-20241022",
+                    model=self.fast_model,
                     max_tokens=20,
                     messages=[{"role": "user", "content": prompt}],
                 )

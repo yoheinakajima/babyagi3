@@ -9,7 +9,7 @@ import json
 from datetime import datetime
 from uuid import uuid4
 
-from metrics import InstrumentedAnthropic, track_source
+from metrics import LiteLLMAnthropicAdapter, track_source, get_model_for_use_case
 from .embeddings import get_embedding
 from .models import Event, ExtractedFeedback, Learning
 
@@ -32,10 +32,15 @@ class FeedbackExtractor:
 
     @property
     def client(self):
-        """Get instrumented Anthropic client for metrics tracking."""
+        """Get instrumented LLM client for metrics tracking (supports multiple providers)."""
         if self._client is None:
-            self._client = InstrumentedAnthropic()
+            self._client = LiteLLMAnthropicAdapter()
         return self._client
+
+    @property
+    def fast_model(self) -> str:
+        """Get the configured fast model for quick classification tasks."""
+        return get_model_for_use_case("fast")
 
     async def extract(
         self,
@@ -166,7 +171,7 @@ Return only valid JSON, no other text."""
         try:
             with track_source("learning"):
                 response = self.client.messages.create(
-                    model="claude-haiku-3-5-20241022",
+                    model=self.fast_model,
                     max_tokens=500,
                     messages=[{"role": "user", "content": prompt}],
                 )
@@ -221,10 +226,15 @@ class ObjectiveEvaluator:
 
     @property
     def client(self):
-        """Get instrumented Anthropic client for metrics tracking."""
+        """Get instrumented LLM client for metrics tracking (supports multiple providers)."""
         if self._client is None:
-            self._client = InstrumentedAnthropic()
+            self._client = LiteLLMAnthropicAdapter()
         return self._client
+
+    @property
+    def fast_model(self) -> str:
+        """Get the configured fast model for quick classification tasks."""
+        return get_model_for_use_case("fast")
 
     async def evaluate(
         self,
@@ -397,7 +407,7 @@ Return only valid JSON, no other text."""
         try:
             with track_source("learning"):
                 response = self.client.messages.create(
-                    model="claude-haiku-3-5-20241022",
+                    model=self.fast_model,
                     max_tokens=800,
                     messages=[{"role": "user", "content": prompt}],
                 )
@@ -501,10 +511,15 @@ class PreferenceSummarizer:
 
     @property
     def client(self):
-        """Get instrumented Anthropic client for metrics tracking."""
+        """Get instrumented LLM client for metrics tracking (supports multiple providers)."""
         if self._client is None:
-            self._client = InstrumentedAnthropic()
+            self._client = LiteLLMAnthropicAdapter()
         return self._client
+
+    @property
+    def model(self) -> str:
+        """Get the configured model for memory operations."""
+        return get_model_for_use_case("memory")
 
     async def refresh_preferences(self, store) -> str:
         """
@@ -602,7 +617,7 @@ Summary:"""
         try:
             with track_source("learning"):
                 response = self.client.messages.create(
-                    model="claude-sonnet-4-20250514",
+                    model=self.model,
                     max_tokens=600,
                     messages=[{"role": "user", "content": prompt}],
                 )

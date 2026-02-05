@@ -68,8 +68,34 @@ def configure_logging_for_verbose(verbose_level: str):
         handler.setLevel(logging.WARNING)
 
 
+def check_llm_provider():
+    """
+    Check if an LLM provider is configured. Exit with helpful message if not.
+
+    This check runs before any async code or agent initialization to provide
+    immediate, clear feedback to the user.
+    """
+    from llm_config import is_llm_configured, get_missing_config_message, get_available_provider
+
+    if not is_llm_configured():
+        # Print the helpful configuration message
+        print(get_missing_config_message())
+        sys.exit(1)
+
+    # Log which provider was detected
+    provider = get_available_provider()
+    provider_names = {
+        "anthropic": "Anthropic (Claude)",
+        "openai": "OpenAI (GPT)",
+    }
+    console.success(f"LLM Provider: {provider_names.get(provider, provider)}")
+
+
 def main():
     """Main entry point."""
+    # First, check if LLM provider is configured (deterministic check, no API calls)
+    check_llm_provider()
+
     if len(sys.argv) > 1:
         command = sys.argv[1]
 

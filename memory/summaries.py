@@ -8,7 +8,7 @@ import heapq
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from metrics import InstrumentedAnthropic, track_source
+from metrics import LiteLLMAnthropicAdapter, track_source, get_model_for_use_case
 from .embeddings import get_embedding
 from .models import SummaryNode
 
@@ -143,10 +143,15 @@ class SummaryManager:
 
     @property
     def client(self):
-        """Get instrumented Anthropic client for metrics tracking."""
+        """Get instrumented LLM client for metrics tracking (supports multiple providers)."""
         if self._client is None:
-            self._client = InstrumentedAnthropic()
+            self._client = LiteLLMAnthropicAdapter()
         return self._client
+
+    @property
+    def model(self) -> str:
+        """Get the configured model for memory operations."""
+        return get_model_for_use_case("memory")
 
     @property
     def queue(self) -> StalenessQueue:
@@ -261,7 +266,7 @@ Summary:"""
 
         with track_source("summary"):
             response = self.client.messages.create(
-                model="claude-sonnet-4-20250514",
+                model=self.model,
                 max_tokens=500,
                 messages=[{"role": "user", "content": prompt}],
             )
@@ -313,7 +318,7 @@ Summary:"""
 
         with track_source("summary"):
             response = self.client.messages.create(
-                model="claude-sonnet-4-20250514",
+                model=self.model,
                 max_tokens=500,
                 messages=[{"role": "user", "content": prompt}],
             )
@@ -367,7 +372,7 @@ Overview:"""
 
         with track_source("summary"):
             response = self.client.messages.create(
-                model="claude-sonnet-4-20250514",
+                model=self.model,
                 max_tokens=400,
                 messages=[{"role": "user", "content": prompt}],
             )

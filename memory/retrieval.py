@@ -8,7 +8,7 @@ Deep Retrieval: Agentic, thorough, invoked for complex queries
 from datetime import datetime
 from typing import Any
 
-from metrics import InstrumentedAnthropic, track_source
+from metrics import LiteLLMAnthropicAdapter, track_source, get_model_for_use_case
 from .embeddings import cosine_similarity, get_embedding
 from .models import Edge, Entity, Event, SummaryNode, Task, Topic
 
@@ -452,10 +452,15 @@ class DeepRetrievalAgent:
 
     @property
     def client(self):
-        """Get instrumented Anthropic client for metrics tracking."""
+        """Get instrumented LLM client for metrics tracking (supports multiple providers)."""
         if self._client is None:
-            self._client = InstrumentedAnthropic()
+            self._client = LiteLLMAnthropicAdapter()
         return self._client
+
+    @property
+    def model(self) -> str:
+        """Get the configured model for retrieval operations."""
+        return get_model_for_use_case("memory")
 
     def get_tools(self) -> list[dict]:
         """Get tool definitions for the retrieval agent."""
@@ -809,7 +814,7 @@ Be thorough but efficient. Stop when you have enough information to answer confi
         for _ in range(max_turns):
             with track_source("retrieval"):
                 response = self.client.messages.create(
-                    model="claude-sonnet-4-20250514",
+                    model=self.model,
                     max_tokens=4096,
                     system=system_prompt,
                     tools=tools,

@@ -26,10 +26,13 @@ import anthropic
 
 from metrics import (
     InstrumentedAsyncAnthropic,
+    AsyncLiteLLMAnthropicAdapter,
     MetricsCollector,
     set_event_emitter,
     track_source,
+    get_model_for_use_case,
 )
+from llm_config import get_llm_config, init_llm_config
 from scheduler import (
     Scheduler, ScheduledTask, Schedule, SchedulerStore,
     create_task, parse_schedule, RunRecord
@@ -189,14 +192,27 @@ class Agent(EventEmitter):
     - task_end: {"id": str, "status": str, "duration_ms": int}
     """
 
-    def __init__(self, model: str = "claude-sonnet-4-20250514", load_tools: bool = True, config: dict = None):
+    def __init__(self, model: str = None, load_tools: bool = True, config: dict = None, use_litellm: bool = True):
         self.__init_events__()  # Initialize event system
 
-        # Use instrumented client for automatic metrics tracking
-        self.client = InstrumentedAsyncAnthropic()
+        # Initialize LLM configuration from config
+        if config:
+            init_llm_config(config)
+
+        # Get model from config if not provided
+        llm_config = get_llm_config()
+        self.model = model or llm_config.agent_model.model_id
+
+        # Select client based on configuration
+        # use_litellm=True (default): Use LiteLLM for multi-provider support (OpenAI, Anthropic, etc.)
+        # use_litellm=False: Use direct Anthropic client (requires ANTHROPIC_API_KEY)
+        if use_litellm:
+            self.client = AsyncLiteLLMAnthropicAdapter()
+        else:
+            self.client = InstrumentedAsyncAnthropic()
+
         set_event_emitter(self)  # Agent is an EventEmitter, metrics emit through it
 
-        self.model = model
         self.tools: dict[str, Tool] = {}
         self.threads: dict[str, list] = {"main": []}
         self.objectives: dict[str, Objective] = {}

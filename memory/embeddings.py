@@ -1,7 +1,11 @@
 """
 Embedding generation utilities for the memory system.
 
-Supports both OpenAI embeddings and local models.
+Supports multiple embedding providers via LiteLLM:
+- OpenAI embeddings (text-embedding-3-small, etc.)
+- Local models (sentence-transformers)
+- Voyage AI embeddings
+
 Includes caching and graceful fallback.
 """
 
@@ -15,7 +19,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from metrics import InstrumentedOpenAI
+from metrics import InstrumentedOpenAI, InstrumentedLiteLLMEmbeddings
 
 # Default embedding model
 DEFAULT_MODEL = "text-embedding-3-small"
@@ -282,6 +286,88 @@ class OpenAIEmbeddings(EmbeddingProvider):
         return results
 
 
+class LiteLLMEmbeddings(EmbeddingProvider):
+    """LiteLLM-based embeddings supporting multiple providers."""
+
+    def __init__(self, model: str = DEFAULT_MODEL, use_cache: bool = True):
+        self.model = model
+        self.use_cache = use_cache
+        self._client = None
+
+    @property
+    def client(self):
+        """Get instrumented LiteLLM embedding client for metrics tracking."""
+        if self._client is None:
+            try:
+                self._client = InstrumentedLiteLLMEmbeddings(default_model=self.model)
+            except ImportError:
+                raise ImportError("litellm package required for LiteLLM embeddings")
+        return self._client
+
+    def embed(self, text: str) -> list[float]:
+        """Generate embedding for a single text."""
+        # Truncate very long texts
+        if len(text) > 8000:
+            text = text[:8000]
+
+        # Check cache first
+        if self.use_cache:
+            cache = get_cache()
+            cached = cache.get(text, self.model)
+            if cached is not None:
+                return cached
+
+        # Generate embedding
+        response = self.client.create(input=text, model=self.model)
+        embedding = response.data[0]["embedding"]
+
+        # Store in cache
+        if self.use_cache:
+            cache.put(text, self.model, embedding)
+
+        return embedding
+
+    def embed_batch(self, texts: list[str], batch_size: int = 100) -> list[list[float]]:
+        """Generate embeddings for multiple texts."""
+        # Truncate texts
+        texts = [t[:8000] if len(t) > 8000 else t for t in texts]
+
+        # Check cache for each text
+        results = [None] * len(texts)
+        uncached_indices = []
+        uncached_texts = []
+
+        if self.use_cache:
+            cache = get_cache()
+            for i, text in enumerate(texts):
+                cached = cache.get(text, self.model)
+                if cached is not None:
+                    results[i] = cached
+                else:
+                    uncached_indices.append(i)
+                    uncached_texts.append(text)
+        else:
+            uncached_indices = list(range(len(texts)))
+            uncached_texts = texts
+
+        # Generate embeddings for uncached texts
+        if uncached_texts:
+            all_embeddings = []
+            for i in range(0, len(uncached_texts), batch_size):
+                batch = uncached_texts[i : i + batch_size]
+                response = self.client.create(input=batch, model=self.model)
+                all_embeddings.extend([d["embedding"] for d in response.data])
+
+            # Store in cache and results
+            cache = get_cache() if self.use_cache else None
+            for idx, embedding in zip(uncached_indices, all_embeddings):
+                results[idx] = embedding
+                if cache:
+                    cache.put(texts[idx], self.model, embedding)
+
+        return results
+
+
 class AnthropicVoyageEmbeddings(EmbeddingProvider):
     """Voyage AI embeddings (Anthropic's recommended provider)."""
 
@@ -383,11 +469,28 @@ def get_provider() -> EmbeddingProvider:
 
 def _create_provider() -> EmbeddingProvider:
     """Create an embedding provider based on available packages and API keys."""
-    # Try OpenAI first
+    # Get embedding configuration from llm_config if available
+    embedding_model = DEFAULT_MODEL
+    try:
+        from llm_config import get_llm_config
+        config = get_llm_config()
+        embedding_model = config.embedding_model
+    except ImportError:
+        pass
+
+    # Try LiteLLM first (supports multiple providers via single interface)
+    if os.environ.get("OPENAI_API_KEY") or os.environ.get("ANTHROPIC_API_KEY"):
+        try:
+            provider = LiteLLMEmbeddings(model=embedding_model)
+            provider.client  # Test that it works
+            return provider
+        except Exception:
+            pass
+
+    # Fall back to direct OpenAI
     if os.environ.get("OPENAI_API_KEY"):
         try:
-            provider = OpenAIEmbeddings()
-            # Test that it works
+            provider = OpenAIEmbeddings(model=embedding_model)
             provider.client  # This will raise if there's an issue
             return provider
         except Exception:

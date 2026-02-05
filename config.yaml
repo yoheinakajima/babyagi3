@@ -94,9 +94,48 @@ channels:
   #   bot_token: "${TELEGRAM_BOT_TOKEN:}"
   #   owner_chat_id: "${TELEGRAM_OWNER_CHAT_ID:}"
 
+# LLM Configuration - Multi-provider support via LiteLLM
+# Works with either OPENAI_API_KEY or ANTHROPIC_API_KEY set
+# Models are automatically selected based on available provider if not specified
+llm:
+  # Model for code generation and analysis (most powerful)
+  coding_model:
+    model: "${CODING_MODEL:claude-sonnet-4-20250514}"
+    max_tokens: 8096
+    temperature: 0.0
+
+  # Model for research and information synthesis
+  research_model:
+    model: "${RESEARCH_MODEL:claude-sonnet-4-20250514}"
+    max_tokens: 4096
+    temperature: 0.0
+
+  # Model for main agent operations
+  agent_model:
+    model: "${AGENT_MODEL:claude-sonnet-4-20250514}"
+    max_tokens: 8096
+    temperature: 0.0
+
+  # Model for memory operations (extraction, summaries, learning)
+  memory_model:
+    model: "${MEMORY_MODEL:claude-sonnet-4-20250514}"
+    max_tokens: 2048
+    temperature: 0.0
+
+  # Model for quick/cheap operations (classification, routing)
+  fast_model:
+    model: "${FAST_MODEL:claude-3-5-haiku-20241022}"
+    max_tokens: 1024
+    temperature: 0.0
+
+  # Embedding configuration
+  embedding_model: "${EMBEDDING_MODEL:text-embedding-3-small}"
+  embedding_provider: "${EMBEDDING_PROVIDER:auto}"  # auto, openai, voyage, local
+
 # Agent settings
 agent:
-  model: "claude-sonnet-4-20250514"
+  # Legacy model setting - use llm.agent_model instead
+  model: "${AGENT_MODEL:claude-sonnet-4-20250514}"
   # model: "claude-opus-4-20250514"  # For more complex tasks
 
   # Agent identity
