@@ -520,14 +520,14 @@ def _composio_setup_tool(agent: "Agent", Tool: type) -> "Tool":
         def _list_connected_accounts(uid: str) -> list:
             """Helper to list connected accounts with SDK compatibility."""
             try:
-                # SDK 0.11+: positional argument
-                return list(client.connected_accounts.list(uid))
+                # SDK 0.11+: user_ids (plural) keyword argument, takes a list
+                return list(client.connected_accounts.list(user_ids=[uid]))
             except TypeError:
                 try:
-                    # Older SDK: keyword argument
+                    # SDK 0.10: user_id (singular) keyword argument
                     return list(client.connected_accounts.list(user_id=uid))
                 except TypeError:
-                    # Even older: entity_ids
+                    # Older SDK: entity_ids
                     return list(client.connected_accounts.list(entity_ids=[uid]))
 
         def _list_apps_via_api() -> list[dict]:
@@ -913,11 +913,8 @@ def _composio_setup_tool(agent: "Agent", Tool: type) -> "Tool":
                 # If we have connection_id, check it directly
                 if connection_id:
                     try:
-                        # SDK 0.11+: positional argument
-                        try:
-                            account = client.connected_accounts.get(connection_id)
-                        except TypeError:
-                            account = client.connected_accounts.get(id=connection_id)
+                        # SDK 0.11+: nanoid keyword argument
+                        account = client.connected_accounts.get(nanoid=connection_id)
                         status = str(getattr(account, 'status', 'unknown')).upper()
 
                         if status == 'ACTIVE':
