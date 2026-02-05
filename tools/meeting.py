@@ -235,7 +235,9 @@ class RecallClient:
             "recording_config": {
                 "transcript": {
                     "provider": {
-                        transcription_provider: {}
+                        transcription_provider: {
+                            "mode": "prioritize_low_latency"  # Get transcripts faster (2-10s vs 3-10min)
+                        }
                     }
                 },
             },
