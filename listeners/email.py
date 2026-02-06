@@ -168,7 +168,8 @@ async def run_email_listener(agent, config: dict = None):
                 try:
                     full_msg = client.inboxes.messages.get(inbox_id=inbox_id, message_id=msg_id)
                     body = getattr(full_msg, 'body', None) or getattr(full_msg, 'text', '') or ''
-                except Exception:
+                except Exception as e:
+                    logger.debug("Could not retrieve full email message %s, using snippet: %s", msg_id, e)
                     body = getattr(msg, 'snippet', '') or ''
 
                 # Determine if owner

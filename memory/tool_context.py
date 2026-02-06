@@ -18,6 +18,10 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 if TYPE_CHECKING:
     from .store import MemoryStore
 
@@ -191,8 +195,8 @@ class ToolContextBuilder:
                     "is_healthy": td.is_healthy,
                     "description": td.description,
                 }
-        except Exception:
-            pass  # Graceful degradation if DB unavailable
+        except Exception as e:
+            logger.debug("Could not retrieve tool stats from database: %s", e)
         return stats
 
     def _select_most_used(
@@ -275,8 +279,8 @@ class ToolContextBuilder:
                     topic = self.store.get_topic(topic_id)
                     if topic:
                         keywords.update(kw.lower() for kw in topic.keywords)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Could not retrieve topic '%s' for keyword extraction: %s", topic_id, e)
 
         if not keywords:
             return set()

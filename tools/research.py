@@ -56,6 +56,10 @@ from uuid import uuid4
 
 from tools import tool, tool_error
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 # ═══════════════════════════════════════════════════════════
 # MEMORY INTEGRATION - Log research findings for extraction
@@ -91,8 +95,8 @@ def _log_to_memory(agent, content: str, event_type: str = "research_finding", me
             direction="internal",
             metadata=metadata or {},
         )
-    except Exception:
-        pass  # Never fail research operations due to memory logging
+    except Exception as e:
+        logger.debug("Failed to log research event to memory: %s", e)
 
 
 def _format_enrichment_for_memory(item_name: str, collection_name: str, updates: dict) -> str:
@@ -1256,8 +1260,8 @@ def pace_work(
                     best_waiting = min(waiting_priorities)
                     result["higher_priority_waiting"] = best_waiting
                     result["waiting_count"] = len(waiting_priorities)
-        except Exception:
-            pass  # Don't fail pacing due to check errors
+        except Exception as e:
+            logger.debug("Failed to check objective queue for pacing: %s", e)
 
     return result
 

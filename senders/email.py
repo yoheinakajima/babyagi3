@@ -4,7 +4,10 @@ Email Sender - Send emails via AgentMail.
 Leverages the existing email tool infrastructure.
 """
 
+import logging
 import os
+
+logger = logging.getLogger(__name__)
 
 
 class EmailSender:
@@ -63,7 +66,8 @@ class EmailSender:
             inbox = client.inboxes.create()
             self._inbox_id = getattr(inbox, 'inbox_id', None) or getattr(inbox, 'id', None)
             return self._inbox_id
-        except Exception:
+        except Exception as e:
+            logger.debug("Could not get or create email inbox: %s", e)
             return None
 
     async def send(self, to: str, content: str, **kwargs) -> dict:

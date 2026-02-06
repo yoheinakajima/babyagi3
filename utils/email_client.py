@@ -5,8 +5,11 @@ Provides a singleton pattern for AgentMail client and inbox management.
 Used by both tools/email.py and listeners/email.py to avoid duplication.
 """
 
+import logging
 import os
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 # Cache the client and inbox
 _client = None
@@ -85,7 +88,8 @@ def get_inbox_id() -> str | None:
         _default_inbox_id = getattr(inbox, 'inbox_id', None) or getattr(inbox, 'id', None)
         return _default_inbox_id
 
-    except Exception:
+    except Exception as e:
+        logger.debug("Could not get or create default email inbox: %s", e)
         return None
 
 

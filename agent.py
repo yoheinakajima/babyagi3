@@ -16,12 +16,15 @@ import asyncio
 import heapq
 import inspect
 import json
+import logging
 import threading
 import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, Protocol, runtime_checkable
+
+logger = logging.getLogger(__name__)
 
 import anthropic
 
@@ -414,7 +417,8 @@ class Agent(EventEmitter):
             try:
                 count = memory.store._conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
                 console.success(f"Memory: loaded ({count} events)")
-            except Exception:
+            except Exception as e:
+                logger.debug("Could not count memory events: %s", e)
                 console.success("Memory: loaded (SQLite persistent)")
 
     def _log_memory_fallback(self, error: Exception):
@@ -488,8 +492,8 @@ class Agent(EventEmitter):
             try:
                 from composio import Composio
                 composio_client = Composio()
-            except Exception:
-                pass  # Composio not available
+            except (ImportError, Exception) as e:
+                logger.debug("Composio not available: %s", e)
 
             for tool_def in tool_defs:
                 try:
@@ -520,8 +524,8 @@ class Agent(EventEmitter):
                             tool_def.name,
                             reason=f"Failed to load on startup: {str(e)[:200]}"
                         )
-                    except Exception:
-                        pass  # Best effort disable
+                    except Exception as e:
+                        logger.warning("Failed to disable broken tool '%s' in database: %s", tool_def.name, e)
 
             if loaded > 0 or failed > 0:
                 details = []
@@ -714,8 +718,8 @@ Work autonomously. Use tools as needed. When done, provide a brief summary of wh
             return create_tool_context_builder(self.memory.store)
         except ImportError:
             return None
-        except Exception:
-            # Graceful degradation - continue without smart tool selection
+        except Exception as e:
+            logger.debug("Could not create tool context builder, continuing without smart tool selection: %s", e)
             return None
 
     def _refresh_tool_selection(self, current_query: str = None, context: dict = None):
@@ -740,8 +744,8 @@ Work autonomously. Use tools as needed. When done, provide a brief summary of wh
                 agent_state = self.memory.store.get_agent_state()
                 if agent_state:
                     current_topics = agent_state.current_topics
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Could not retrieve agent state for tool selection: %s", e)
 
         current_channel = context.get("channel") if context else None
 
@@ -843,8 +847,8 @@ Work autonomously. Use tools as needed. When done, provide a brief summary of wh
                     self._current_memory_event = log_message(
                         self.memory, user_input, context, "inbound"
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning("Failed to log inbound message to memory: %s", e)
 
             # Refresh tool selection for this turn
             # This selects relevant tools based on query, context, and usage patterns
@@ -1157,7 +1161,8 @@ Work autonomously. Use tools as needed. When done, provide a final summary."""
             from memory.integration import get_memory_context_prompt
             event = getattr(self, "_current_memory_event", None)
             return get_memory_context_prompt(self.memory, event)
-        except Exception:
+        except Exception as e:
+            logger.warning("Failed to build memory context prompt: %s", e)
             return ""
 
     def _build_owner_section(self) -> str:
@@ -2405,7 +2410,8 @@ async def main_async():
     try:
         from tools import get_health_summary
         health_summary = get_health_summary()
-    except Exception:
+    except Exception as e:
+        logger.debug("Could not get tool health summary: %s", e)
         health_summary = "Core tools ready."
 
     # Generate personalized greeting from the AI
@@ -2424,7 +2430,8 @@ Be concise. Mention what you can help with based on available tools. If any tool
         )
         greeting_text = "".join(b.text for b in greeting.content if hasattr(b, "text"))
         print(f"\n{greeting_text}\n")
-    except Exception:
+    except Exception as e:
+        logger.debug("Could not generate AI greeting: %s", e)
         print("\nReady to assist. Type 'quit' to exit.\n")
 
     try:

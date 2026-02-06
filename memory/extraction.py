@@ -10,6 +10,10 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from metrics import LiteLLMAnthropicAdapter, track_source, get_model_for_use_case
+import logging
+
+logger = logging.getLogger(__name__)
+
 from .embeddings import get_embedding
 from .models import (
     Event,
@@ -648,8 +652,8 @@ Respond with only the category name, nothing else."""
             if result in self.ENTITY_TYPE_CLUSTERS:
                 self._type_cache[cache_key] = result
                 return result
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("LLM entity type clustering failed, falling back to 'concept': %s", e)
 
         # Fallback to concept
         self._type_cache[cache_key] = "concept"
@@ -695,8 +699,8 @@ Respond with only the category name, nothing else."""
             if result in self.RELATION_TYPE_CLUSTERS:
                 self._relation_cache[cache_key] = result
                 return result
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("LLM relation type clustering failed, falling back to 'other': %s", e)
 
         # Fallback to other
         self._relation_cache[cache_key] = "other"

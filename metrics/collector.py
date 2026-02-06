@@ -5,9 +5,12 @@ Subscribes to events from instrumented clients and provides
 aggregation/query methods for analysis.
 """
 
+import logging
 from datetime import datetime, timedelta
 from typing import Any
 from uuid import uuid4
+
+logger = logging.getLogger(__name__)
 
 from .models import (
     LLMCallMetric,
@@ -91,8 +94,8 @@ class MetricsCollector:
         if self.store:
             try:
                 self.store.record_llm_call(metric)
-            except Exception:
-                pass  # Don't crash on persistence failure
+            except Exception as e:
+                logger.debug("Failed to persist LLM call metrics: %s", e)
 
     def _on_embedding_call_end(self, event: dict):
         """Handle embedding call completion event."""
@@ -113,8 +116,8 @@ class MetricsCollector:
         if self.store:
             try:
                 self.store.record_embedding_call(metric)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Failed to persist embedding call metrics: %s", e)
 
     def _on_tool_start(self, event: dict):
         """Track tool start for duration calculation."""

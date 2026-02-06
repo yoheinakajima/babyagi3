@@ -14,6 +14,10 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 from .models import (
     AgentState,
     Credential,
@@ -144,8 +148,8 @@ class MemoryStore:
                         break
                     except sqlite3.OperationalError:
                         continue
-            except Exception:
-                pass  # Extension loading not available
+            except Exception as e:
+                logger.debug("SQLite extension loading not available: %s", e)
         return self._conn
 
     def initialize(self):
@@ -2968,8 +2972,8 @@ class MemoryStore:
                 (now, now, tool_name),
             )
             self.conn.commit()
-        except Exception:
-            pass  # Never crash on error recording
+        except Exception as e:
+            logger.debug("Failed to record tool error stats: %s", e)
 
     def disable_tool(self, name: str, reason: str | None = None) -> bool:
         """

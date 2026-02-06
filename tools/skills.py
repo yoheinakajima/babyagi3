@@ -14,7 +14,10 @@ Tool Types:
 
 import re
 import yaml
+import logging
 from typing import TYPE_CHECKING
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from agent import Agent, Tool
@@ -484,8 +487,8 @@ def _composio_setup_tool(agent: "Agent", Tool: type) -> "Tool":
                                 auth_type="custom" if custom_credentials else "managed",
                             )
                         return auth_config_id
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Could not save Composio auth config via SDK for '%s': %s", toolkit, e)
 
             # Fallback: Try REST API to create auth config
             api_key = os.environ.get("COMPOSIO_API_KEY", "")
@@ -518,8 +521,8 @@ def _composio_setup_tool(agent: "Agent", Tool: type) -> "Tool":
                                 auth_type="custom" if custom_credentials else "managed",
                             )
                         return auth_config_id
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Could not create Composio auth config via REST API for '%s': %s", toolkit, e)
 
             return None
 
@@ -582,8 +585,8 @@ def _composio_setup_tool(agent: "Agent", Tool: type) -> "Tool":
                         }
                         for app in apps
                     ]
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Could not list Composio apps via API: %s", e)
             return []
 
         # ═══════════════════════════════════════════════════════════════════
@@ -649,8 +652,8 @@ def _composio_setup_tool(agent: "Agent", Tool: type) -> "Tool":
                         if response.status_code == 200:
                             target_app = response.json()
                             auth_schemes = target_app.get("auth_schemes") or target_app.get("authSchemes")
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("Could not fetch auth schemes for app '%s': %s", app, e)
 
                 if not target_app:
                     # App not found or API error - provide generic OAuth guidance
@@ -722,8 +725,8 @@ def _composio_setup_tool(agent: "Agent", Tool: type) -> "Tool":
                                     "type": "preconfigured",
                                     "message": f"Auth config exists for {app}. Use connect action."
                                 })
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("Could not check auth configs for app '%s': %s", app, e)
 
                     if not expected_params:
                         # Default: assume OAuth
@@ -833,8 +836,8 @@ def _composio_setup_tool(agent: "Agent", Tool: type) -> "Tool":
                                         "message": f"A pending connection already exists for {app}. Please complete the authorization at the URL above, then poll for completion.",
                                         "next_step": f"After authorizing, use: composio_setup(action='poll_connection', app='{app}', connection_id='{acc_id}')"
                                     }
-                    except Exception:
-                        pass  # Continue with connection attempt
+                    except Exception as e:
+                        logger.debug("Could not check pending connections for '%s': %s", app, e)
 
                 # Get or create auth_config_id (required for SDK 0.10+)
                 auth_config_id = get_or_create_auth_config(app, credentials if credentials else None)
@@ -920,8 +923,8 @@ def _composio_setup_tool(agent: "Agent", Tool: type) -> "Tool":
                                         "message": f"{app} is already connected and active. You can enable tools now.",
                                         "next_step": f"Use: composio_setup(action='enable', app='{app}')"
                                     }
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug("Could not check connection status for '%s': %s", app, e)
                     return {
                         "error": f"Failed to initiate OAuth for {app}: {init_error}",
                         "suggestion": f"This app may require specific credentials. Try: composio_setup(action='get_auth_params', app='{app}')"
@@ -1083,8 +1086,8 @@ def _composio_setup_tool(agent: "Agent", Tool: type) -> "Tool":
                         if acc_app.upper() == app.upper() and acc_status == 'ACTIVE':
                             is_connected = True
                             break
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Could not verify Composio connection status for '%s': %s", app, e)
 
                 if not is_connected:
                     return {
@@ -1196,8 +1199,8 @@ def _composio_setup_tool(agent: "Agent", Tool: type) -> "Tool":
                         "status": str(getattr(account, 'status', 'unknown')),
                         "id": _get_account_id(account),
                     })
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Could not list Composio connections: %s", e)
 
             # Get stored auth configs
             auth_configs = ag.memory.store.list_composio_auth_configs()

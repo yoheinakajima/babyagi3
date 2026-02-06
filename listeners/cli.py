@@ -67,7 +67,8 @@ async def run_cli_listener(agent, config: dict = None, start_scheduler: bool = F
     try:
         from tools import get_health_summary
         health_summary = get_health_summary()
-    except Exception:
+    except Exception as e:
+        logger.debug("Could not get tool health summary: %s", e)
         health_summary = "Core tools ready."
 
     # Generate personalized greeting

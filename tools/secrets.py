@@ -21,6 +21,10 @@ The agent can:
 import os
 from tools import tool
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 # Service name for keyring storage
 KEYRING_SERVICE = "babyagi"
 
@@ -178,8 +182,8 @@ def delete_secret(name: str) -> dict:
         try:
             keyring.delete_password(KEYRING_SERVICE, name_upper)
             deleted_from.append("keyring")
-        except Exception:
-            pass  # Key might not exist
+        except Exception as e:
+            logger.debug("Could not delete secret '%s' from keyring (may not exist): %s", name, e)
 
     if deleted_from:
         return {"deleted": True, "name": name, "from": deleted_from}
