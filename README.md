@@ -24,34 +24,57 @@ Verbose mode is on by default — you'll see tool calls, webhook activity, and b
 
 ## Initialization
 
-On first run, BabyAGI starts an LLM-powered setup conversation. It detects that no `~/.babyagi/initialized` marker exists and launches an interactive onboarding chat before starting the agent.
+BabyAGI figures out the right setup path automatically — no manual file management needed.
 
-The setup assistant has full context about how BabyAGI works — you can ask it questions ("what does AgentMail do?", "do I need SendBlue?", "how does memory work?") and provide your info in any order. It guides you conversationally and calls a `complete_initialization` tool when it has everything it needs.
+### How it works
+
+On first run, BabyAGI checks whether it has enough configuration to start:
+
+1. **Already configured?** If `OWNER_NAME` and `OWNER_EMAIL` are set (via environment variables or `config.yaml`), the agent starts immediately — no wizard, no prompts, no extra steps.
+2. **Need info?** If the minimum config is missing, an LLM-powered setup conversation guides you through onboarding before the agent starts. You can ask it questions ("what does AgentMail do?", "do I need SendBlue?") and provide info in any order.
+3. **Already ran setup before?** The agent remembers and skips straight to startup.
+
+In every case, the agent starts normally after initialization — no restart required.
 
 ### What gets collected
 
-At minimum, the assistant needs your **name** and **email**. It will also walk you through setting up:
+At minimum, the setup assistant needs your **name** and **email**. It will also walk you through setting up:
 
 - **Email channel ([AgentMail](https://agentmail.to))** — gives your agent its own email address for sending reports, handling signups, and email communication. Free tier available.
 - **SMS/iMessage channel ([SendBlue](https://sendblue.co))** — lets you text your agent from your phone. Needs an API key, secret, and your phone number.
 
 ### What gets set up automatically
 
-Once the wizard finishes, two recurring tasks are scheduled:
+Once setup finishes, two recurring tasks are scheduled:
 
-- **Daily Stats Report** — compiles tool usage, memory extraction counts, LLM costs by model/source, scheduled task statuses, and errors from the last 24 hours. Emails the report to you. First run is ~5 minutes after setup, then every 24 hours.
-- **Daily Self-Improvement** — the agent picks one concrete action each day to become more helpful: create a new skill, set up a useful scheduled task, or ask you a question to better understand your needs. It tracks past actions in memory to avoid repetition.
+- **Daily Stats Report** — compiles tool usage, memory extraction counts, LLM costs by model/source, scheduled task statuses, and errors from the last 24 hours. Emails the report to you.
+- **Daily Self-Improvement** — the agent picks one concrete action each day to become more helpful: create a new skill, set up a useful scheduled task, or ask you a question to better understand your needs.
 
-### Re-running initialization
+### Skipping the wizard
 
-Delete the marker file and restart:
+Set the minimum config and the wizard is bypassed entirely:
 
 ```bash
-rm ~/.babyagi/initialized
-python main.py
+export OWNER_NAME="Alice"
+export OWNER_EMAIL="alice@example.com"
+python main.py  # starts immediately, no wizard
 ```
 
-Or skip the wizard entirely and configure manually via `config.yaml` and environment variables (see [Configuration](#configuration) below).
+Or put it in `config.yaml`:
+
+```yaml
+owner:
+  name: "Alice"
+  email: "alice@example.com"
+```
+
+### Re-running setup
+
+```bash
+python main.py init
+```
+
+This re-launches the interactive setup wizard, then continues into the agent — no manual file deletion needed.
 
 ---
 
@@ -257,6 +280,7 @@ python main.py serve        # HTTP API server only (port 5000)
 python main.py serve 8080   # Custom port
 python main.py all          # Server + all channels combined
 python main.py all 8080     # Full mode, custom port
+python main.py init         # Re-run interactive setup, then start
 ```
 
 See [RUNNING.md](RUNNING.md) for detailed examples of each mode, including API curl commands.

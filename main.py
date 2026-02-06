@@ -10,6 +10,7 @@ Usage:
     python main.py channels     # Run listeners only (no webhook server)
     python main.py all          # Run EVERYTHING: CLI + Email + SMS webhooks
     python main.py all 8080     # Run all on custom port
+    python main.py init         # Re-run interactive setup wizard
 
 Channels:
     - CLI: Command-line interface (always enabled)
@@ -112,11 +113,23 @@ def main():
     # First, check if LLM provider is configured (deterministic check, no API calls)
     check_llm_provider()
 
-    # Check if first-time initialization is needed
-    from initialization import needs_initialization, run_initialization
-    if needs_initialization():
+    # Handle explicit re-initialization: python main.py init
+    if len(sys.argv) > 1 and sys.argv[1] == "init":
         from config import load_config
+        from initialization import run_initialization
         config = load_config()
+        run_initialization(config, force=True)
+        # After init, continue into default mode (all channels)
+        asyncio.run(run_all_channels())
+        return
+
+    # Check if first-time initialization is needed.
+    # Passing config lets it detect manual configuration (env vars / config.yaml)
+    # and auto-skip the wizard when owner name + email are already set.
+    from config import load_config
+    from initialization import needs_initialization, run_initialization
+    config = load_config()
+    if needs_initialization(config):
         run_initialization(config)
 
     if len(sys.argv) > 1:
@@ -144,7 +157,7 @@ def main():
 
         else:
             console.error(f"Unknown command: {command}")
-            console.system("Usage: python main.py [serve|channels|cli|all]")
+            console.system("Usage: python main.py [serve|channels|cli|all|init]")
             sys.exit(1)
     else:
         # Default: Run all enabled channels
