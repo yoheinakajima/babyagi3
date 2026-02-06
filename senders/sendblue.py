@@ -94,14 +94,14 @@ class SendBlueSender:
                     timeout=30.0
                 )
 
-                if response.status_code == 200:
+                if response.status_code in (200, 202):
                     data = response.json()
                     return {
                         "sent": True,
                         "channel": "sendblue",
                         "to": to_number,
                         "message_id": data.get("message_handle"),
-                        "status": data.get("status", "sent")
+                        "status": data.get("status", "queued" if response.status_code == 202 else "sent")
                     }
                 else:
                     error_data = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
