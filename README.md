@@ -338,14 +338,12 @@ Each folder has its own README with file-by-file documentation.
 | **[RUNNING.md](RUNNING.md)** | Manual running examples for every mode |
 | **[ARCHITECTURE.md](ARCHITECTURE.md)** | System architecture with Mermaid diagrams |
 | **[MODELS.md](MODELS.md)** | Complete data model reference |
-| **[TODO.md](TODO.md)** | Open items before open source release |
 | **[memory/README.md](memory/README.md)** | Memory system internals |
 | **[tools/README.md](tools/README.md)** | Tool system and @tool decorator |
 | **[listeners/README.md](listeners/README.md)** | Input channel details |
 | **[senders/README.md](senders/README.md)** | Output channel details |
 | **[utils/README.md](utils/README.md)** | EventEmitter, console, utilities |
 | **[metrics/README.md](metrics/README.md)** | Cost tracking system |
-| **[docs/README.md](docs/README.md)** | Design documents index |
 
 ---
 
