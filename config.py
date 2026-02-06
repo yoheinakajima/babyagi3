@@ -68,7 +68,10 @@ def _default_config() -> dict:
     return {
         "owner": {
             "id": os.environ.get("OWNER_ID", "owner"),
+            "name": os.environ.get("OWNER_NAME", ""),
             "email": os.environ.get("OWNER_EMAIL", ""),
+            "phone": os.environ.get("OWNER_PHONE", ""),
+            "timezone": os.environ.get("OWNER_TIMEZONE", ""),
             "contacts": {
                 "email": os.environ.get("OWNER_EMAIL", ""),
             }

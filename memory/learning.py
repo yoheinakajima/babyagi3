@@ -73,6 +73,13 @@ class FeedbackExtractor:
         # Create learning from feedback
         content = self._format_learning_content(feedback)
 
+        # Determine category — use LLM-classified category, validate it
+        valid_categories = {"general", "owner_profile", "agent_self", "tool_feedback"}
+        category = feedback.category if feedback.category in valid_categories else "general"
+        # Auto-classify tool feedback if tool is referenced
+        if feedback.about_tool and category == "general":
+            category = "tool_feedback"
+
         learning = Learning(
             id=generate_id(),
             source_type="user_feedback",
@@ -81,6 +88,7 @@ class FeedbackExtractor:
             content_embedding=get_embedding(content),
             sentiment=feedback.sentiment,
             confidence=feedback.confidence,
+            category=category,
             tool_id=feedback.about_tool,
             objective_type=feedback.about_objective_type,
             applies_when=feedback.what_was_wrong,
@@ -146,11 +154,14 @@ Determine if the message contains feedback (correction, praise, preference, comp
 - A specific tool that was used
 - A type of task/objective
 - General working style
+- Owner profile info (facts about themselves: location, interests, schedule, role, etc.)
+- Agent self-improvement (how the agent should behave, its role, boundaries)
 
 Return JSON:
 {{
     "has_feedback": true/false,
-    "feedback_type": "correction" | "praise" | "preference" | "complaint" | null,
+    "feedback_type": "correction" | "praise" | "preference" | "complaint" | "profile_info" | null,
+    "category": "general" | "owner_profile" | "agent_self" | "tool_feedback",
     "about_tool": "tool_name or null",
     "about_objective_type": "research/code/email/communication/etc or null",
     "what_was_wrong": "description of issue or null",
@@ -159,12 +170,19 @@ Return JSON:
     "confidence": 0.0-1.0
 }}
 
+Category guide:
+- "owner_profile": facts about the owner (interests, timezone, role, preferences, schedule)
+- "agent_self": how the agent should behave, its boundaries, role definition
+- "tool_feedback": feedback about a specific tool's usage
+- "general": everything else (work style, communication, general preferences)
+
 Examples of feedback:
-- "Actually, I prefer shorter emails" → preference about email/communication
-- "That's not how I want the code formatted" → correction about code
-- "Great research, exactly what I needed" → praise about research
-- "Don't use that API, use X instead" → correction about specific tool
-- "Next time, ask me first before sending" → preference about workflow
+- "Actually, I prefer shorter emails" → preference, category=general
+- "I'm a VC focused on AI startups" → profile_info, category=owner_profile
+- "Don't spend money without asking me" → preference, category=agent_self
+- "Don't use that API, use X instead" → correction, category=tool_feedback
+- "I'm usually free after 3pm Pacific" → profile_info, category=owner_profile
+- "You should always check my calendar before scheduling" → preference, category=agent_self
 
 Return only valid JSON, no other text."""
 
@@ -189,6 +207,7 @@ Return only valid JSON, no other text."""
             return ExtractedFeedback(
                 has_feedback=data.get("has_feedback", False),
                 feedback_type=data.get("feedback_type"),
+                category=data.get("category", "general"),
                 about_tool=data.get("about_tool"),
                 about_objective_type=data.get("about_objective_type"),
                 what_was_wrong=data.get("what_was_wrong"),
@@ -283,6 +302,12 @@ class ObjectiveEvaluator:
 
             applies_to = item.get("applies_to", "general")
 
+            # Determine category for self-evaluation learnings
+            if applies_to not in ["objective_type", "general"]:
+                eval_category = "tool_feedback"
+            else:
+                eval_category = "agent_self"
+
             learning = Learning(
                 id=generate_id(),
                 source_type="self_evaluation",
@@ -291,6 +316,7 @@ class ObjectiveEvaluator:
                 content_embedding=get_embedding(insight),
                 sentiment=item.get("sentiment", "neutral"),
                 confidence=evaluation.get("overall_score", 5) / 10.0,
+                category=eval_category,
                 tool_id=applies_to if applies_to not in ["objective_type", "general"] else None,
                 objective_type=objective_type if applies_to == "objective_type" else None,
                 recommendation=item.get("recommendation"),
@@ -477,13 +503,17 @@ class LearningRetriever:
         """Get most recent learnings regardless of type."""
         return self.store.find_learnings(limit=limit)
 
+    def get_by_category(self, category: str, limit: int = 5) -> list[Learning]:
+        """Get learnings for a specific category (owner_profile, agent_self, etc.)."""
+        return self.store.find_learnings(category=category, limit=limit)
+
     def format_for_context(self, learnings: list[Learning]) -> list[dict]:
         """Format learnings for inclusion in AssembledContext."""
         result = []
         for learning in learnings:
             entry = {
                 "learning": learning.content,
-                "type": "tool" if learning.tool_id else "general",
+                "type": "tool" if learning.tool_id else learning.category,
             }
             if learning.tool_id:
                 entry["tool"] = learning.tool_id
@@ -547,24 +577,33 @@ class PreferenceSummarizer:
         return await self._llm_summarize(learnings_text)
 
     def _group_learnings(self, learnings: list[Learning]) -> dict:
-        """Group learnings by category for summarization."""
+        """Group learnings by category for summarization.
+
+        Uses the Learning.category field first, then falls back to
+        heuristic grouping for uncategorized learnings.
+        """
         groups = {
+            "owner_profile": [],
+            "agent_self": [],
             "tool_preferences": [],
             "communication_style": [],
             "work_approach": [],
-            "domain_specific": [],
             "general": [],
         }
 
         for learning in learnings:
-            if learning.tool_id:
+            # Use explicit category first
+            if learning.category == "owner_profile":
+                groups["owner_profile"].append(learning)
+            elif learning.category == "agent_self":
+                groups["agent_self"].append(learning)
+            elif learning.category == "tool_feedback" or learning.tool_id:
                 groups["tool_preferences"].append(learning)
+            # Fall back to heuristic grouping
             elif learning.objective_type in ["email", "communication"]:
                 groups["communication_style"].append(learning)
             elif learning.objective_type in ["research", "code", "data"]:
                 groups["work_approach"].append(learning)
-            elif learning.objective_type:
-                groups["domain_specific"].append(learning)
             else:
                 groups["general"].append(learning)
 
@@ -592,25 +631,30 @@ class PreferenceSummarizer:
 
     async def _llm_summarize(self, learnings_text: str) -> str:
         """Call LLM to generate preferences summary."""
-        prompt = f"""Summarize these learnings into concise user preferences.
+        prompt = f"""Summarize these learnings into concise, actionable context.
 
 LEARNINGS:
 {learnings_text}
 
-Create a brief summary (5-10 bullet points) that captures:
-1. Communication preferences (tone, length, format)
-2. Tool usage preferences (which tools, how to use them)
-3. Work style preferences (thoroughness, speed, approach)
-4. Any domain-specific preferences
+Create a brief summary (8-15 bullet points) organized into these sections:
 
-Format as actionable instructions that an AI assistant should follow.
-Each point should be specific and practical.
+**Owner Profile** (who they are, interests, schedule, location, role):
+- Only include facts explicitly stated or clearly inferred
+- Example: "Based in San Francisco, PST timezone"
+- Example: "Focused on AI startups and venture capital"
 
-Example format:
-- Keep emails under 3 paragraphs
-- Always confirm before sending messages to external parties
-- Prefer Python over JavaScript for scripts
-- Include source links in research summaries
+**Agent Rules** (how the agent should behave, boundaries, role):
+- Example: "Always ask before spending any money"
+- Example: "Check calendar before scheduling meetings"
+
+**Communication Preferences** (tone, length, format, style):
+- Example: "Keep emails under 3 paragraphs"
+
+**Tool & Work Preferences** (how to approach tasks):
+- Example: "Prefer Python over JavaScript for scripts"
+
+Only include sections that have actual learnings. Be specific and practical.
+Format as actionable instructions the AI assistant should follow.
 
 Summary:"""
 

@@ -835,6 +835,17 @@ Work autonomously. Use tools as needed. When done, provide a brief summary of wh
 
             thread.append({"role": "user", "content": user_input})
 
+            # Log inbound message to memory for context assembly
+            self._current_memory_event = None
+            if self.memory:
+                try:
+                    from memory.integration import log_message
+                    self._current_memory_event = log_message(
+                        self.memory, user_input, context, "inbound"
+                    )
+                except Exception:
+                    pass
+
             # Refresh tool selection for this turn
             # This selects relevant tools based on query, context, and usage patterns
             self._refresh_tool_selection(user_input, context)
@@ -1120,11 +1131,55 @@ Work autonomously. Use tools as needed. When done, provide a final summary."""
     # -------------------------------------------------------------------------
 
     def _system_prompt(self, thread_id: str = "main", is_owner: bool = True, context: dict = None) -> str:
-        """Generate context-aware system prompt."""
+        """Generate context-aware system prompt.
+
+        Assembles three layers:
+        1. Base prompt (static): agent identity, owner info, capabilities, rules
+        2. Memory context (dynamic): knowledge, preferences, learnings, state
+        3. Situation context (per-message): channel, thread, is_owner, formatting
+        """
         context = context or {}
         base = self._build_base_prompt()
-        current_context = self._build_context_section(thread_id, is_owner, context)
-        return base + current_context
+        memory_ctx = self._build_memory_context()
+        situation = self._build_context_section(thread_id, is_owner, context)
+        return base + memory_ctx + situation
+
+    def _build_memory_context(self) -> str:
+        """Build dynamic context from the memory system.
+
+        Includes: knowledge summary, agent state, user preferences,
+        recent activity, counterparty info, and context-specific learnings.
+        Returns empty string if memory is unavailable.
+        """
+        if not self.memory:
+            return ""
+        try:
+            from memory.integration import get_memory_context_prompt
+            event = getattr(self, "_current_memory_event", None)
+            return get_memory_context_prompt(self.memory, event)
+        except Exception:
+            return ""
+
+    def _build_owner_section(self) -> str:
+        """Build owner info for the system prompt from config.
+
+        Only includes fields that are actually set. This gives the agent
+        basic knowledge about its owner (contact info, timezone) that
+        comes from the owner's explicit configuration.
+        """
+        owner_config = self.config.get("owner", {})
+        lines = []
+        if owner_config.get("name"):
+            lines.append(f"- Name: {owner_config['name']}")
+        if owner_config.get("email"):
+            lines.append(f"- Email: {owner_config['email']}")
+        if owner_config.get("phone"):
+            lines.append(f"- Phone: {owner_config['phone']}")
+        if owner_config.get("timezone"):
+            lines.append(f"- Timezone: {owner_config['timezone']}")
+        if not lines:
+            return ""
+        return "\nYOUR OWNER:\n" + "\n".join(lines) + "\n"
 
     def _build_status_summaries(self) -> str:
         """Build status summaries for objectives, tasks, and channels."""
@@ -1166,6 +1221,9 @@ Work autonomously. Use tools as needed. When done, provide a final summary."""
         agent_description = agent_config.get("description", "a helpful AI assistant")
         agent_objective = agent_config.get("objective", "Help my owner with tasks and handle communications on their behalf.")
 
+        # Build owner info section from config
+        owner_section = self._build_owner_section()
+
         # Get behavior settings
         behavior = agent_config.get("behavior", {})
         spending_config = behavior.get("spending", {})
@@ -1198,7 +1256,7 @@ YOUR IDENTITY:
 - Your purpose: {agent_objective}
 - You have your own email address via AgentMail - use get_agent_email() to retrieve it
 - You are an autonomous agent acting on behalf of your owner
-
+{owner_section}
 CRITICAL IDENTITY RULES:
 1. You have your OWN email address - ALWAYS use get_agent_email() when you need an email for signups
 2. NEVER create new email accounts (Gmail, Yahoo, Outlook, Hotmail, etc.) - you already have your own email

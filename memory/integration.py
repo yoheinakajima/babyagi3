@@ -215,6 +215,16 @@ def setup_memory_hooks(agent, memory):
         )
 
     # ═══════════════════════════════════════════════════════════
+    # STATE SEEDING
+    # ═══════════════════════════════════════════════════════════
+
+    # Seed agent state and owner entity from config
+    try:
+        _seed_agent_state(agent.config, memory)
+    except Exception:
+        pass  # Non-critical — agent works without seeding
+
+    # ═══════════════════════════════════════════════════════════
     # SELF-IMPROVEMENT HOOKS
     # ═══════════════════════════════════════════════════════════
 
@@ -267,6 +277,76 @@ def setup_memory_hooks(agent, memory):
         except RuntimeError:
             # No event loop running, skip async evaluation
             pass
+
+
+def _seed_agent_state(config: dict, memory):
+    """Seed agent state and owner entity from config on startup.
+
+    Ensures:
+    - AgentState.name and .description reflect current config
+    - An owner entity exists with is_owner=True
+    - AgentState.owner_entity_id points to it
+
+    This runs once at startup. It's idempotent — safe to call repeatedly.
+    Config values always win (the owner controls config, the agent learns the rest).
+    """
+    agent_config = config.get("agent", {})
+    owner_config = config.get("owner", {})
+
+    state = memory.get_agent_state()
+    updates = {}
+
+    # Sync agent identity from config → state
+    config_name = agent_config.get("name", "Assistant")
+    config_desc = agent_config.get("description")
+    if config_name and state.name != config_name:
+        updates["name"] = config_name
+    if config_desc and state.description != config_desc:
+        updates["description"] = config_desc
+
+    # Ensure owner entity exists
+    if not state.owner_entity_id:
+        owner_entity = _find_or_create_owner_entity(memory, owner_config)
+        if owner_entity:
+            updates["owner_entity_id"] = owner_entity.id
+
+    if updates:
+        memory.update_agent_state(**updates)
+
+
+def _find_or_create_owner_entity(memory, owner_config: dict):
+    """Find existing owner entity or create one from config.
+
+    Looks for an entity with is_owner=True. If none exists, creates one
+    using the owner's name (or "Owner") and contact info from config.
+    """
+    # Look for existing owner entity
+    cur = memory.store.conn.cursor()
+    cur.execute("SELECT id FROM entities WHERE is_owner = 1 LIMIT 1")
+    row = cur.fetchone()
+    if row:
+        return memory.store.get_entity(row["id"])
+
+    # Create owner entity from config
+    owner_name = owner_config.get("name") or owner_config.get("id", "Owner")
+
+    # Build description from available contact info
+    desc_parts = []
+    if owner_config.get("email"):
+        desc_parts.append(f"Email: {owner_config['email']}")
+    if owner_config.get("phone"):
+        desc_parts.append(f"Phone: {owner_config['phone']}")
+    if owner_config.get("timezone"):
+        desc_parts.append(f"Timezone: {owner_config['timezone']}")
+    description = "Agent owner" + (". " + ", ".join(desc_parts) if desc_parts else "")
+
+    return memory.store.create_entity(
+        name=owner_name,
+        type="person",
+        type_raw="owner",
+        description=description,
+        is_owner=True,
+    )
 
 
 def setup_feedback_extraction(agent, memory):

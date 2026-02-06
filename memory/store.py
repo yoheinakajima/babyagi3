@@ -151,8 +151,10 @@ class MemoryStore:
     def initialize(self):
         """Initialize the database schema."""
         self._create_tables()
-        self._create_indices()
+        # Run migrations before indices — new indices may reference new columns
         self._migrate_tool_definitions()
+        self._migrate_learnings()
+        self._create_indices()
         self._ensure_root_node()
         self._ensure_agent_state()
 
@@ -181,6 +183,20 @@ class MemoryStore:
                     pass  # Column might already exist
 
         self.conn.commit()
+
+    def _migrate_learnings(self):
+        """Add category column to learnings table for existing databases."""
+        cur = self.conn.cursor()
+        cur.execute("PRAGMA table_info(learnings)")
+        existing_columns = {row["name"] for row in cur.fetchall()}
+        if "category" not in existing_columns:
+            try:
+                cur.execute(
+                    "ALTER TABLE learnings ADD COLUMN category TEXT NOT NULL DEFAULT 'general'"
+                )
+                self.conn.commit()
+            except sqlite3.OperationalError:
+                pass
 
     def _create_tables(self):
         """Create all tables."""
@@ -525,6 +541,7 @@ class MemoryStore:
                 -- Classification
                 sentiment TEXT NOT NULL DEFAULT 'neutral',
                 confidence REAL DEFAULT 0.5,
+                category TEXT NOT NULL DEFAULT 'general',
 
                 -- Associations
                 tool_id TEXT,
@@ -758,6 +775,7 @@ class MemoryStore:
             "CREATE INDEX IF NOT EXISTS idx_learnings_objective_type ON learnings(objective_type)",
             "CREATE INDEX IF NOT EXISTS idx_learnings_sentiment ON learnings(sentiment)",
             "CREATE INDEX IF NOT EXISTS idx_learnings_source_type ON learnings(source_type)",
+            "CREATE INDEX IF NOT EXISTS idx_learnings_category ON learnings(category)",
             "CREATE INDEX IF NOT EXISTS idx_learnings_created_at ON learnings(created_at DESC)",
             # Facts indices
             "CREATE INDEX IF NOT EXISTS idx_facts_subject ON facts(subject_entity_id)",
@@ -3792,10 +3810,10 @@ class MemoryStore:
             """
             INSERT INTO learnings
             (id, source_type, source_event_id, content, content_embedding,
-             sentiment, confidence, tool_id, topic_ids, objective_type,
+             sentiment, confidence, category, tool_id, topic_ids, objective_type,
              entity_ids, applies_when, recommendation, times_applied,
              last_applied_at, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
             (
                 learning.id,
@@ -3805,6 +3823,7 @@ class MemoryStore:
                 serialize_embedding(learning.content_embedding),
                 learning.sentiment,
                 learning.confidence,
+                learning.category,
                 learning.tool_id,
                 serialize_json(learning.topic_ids),
                 learning.objective_type,
@@ -3833,6 +3852,7 @@ class MemoryStore:
         objective_type: str | None = None,
         sentiment: str | None = None,
         source_type: str | None = None,
+        category: str | None = None,
         limit: int = 20,
     ) -> list[Learning]:
         """Find learnings by filters."""
@@ -3853,6 +3873,9 @@ class MemoryStore:
         if source_type:
             query += " AND source_type = ?"
             params.append(source_type)
+        if category:
+            query += " AND category = ?"
+            params.append(category)
 
         query += " ORDER BY created_at DESC LIMIT ?"
         params.append(limit)
@@ -4006,6 +4029,12 @@ class MemoryStore:
 
     def _row_to_learning(self, row: sqlite3.Row) -> Learning:
         """Convert a database row to a Learning."""
+        # Handle databases created before the category column was added
+        try:
+            category = row["category"]
+        except (IndexError, KeyError):
+            category = "general"
+
         return Learning(
             id=row["id"],
             source_type=row["source_type"],
@@ -4014,6 +4043,7 @@ class MemoryStore:
             content_embedding=deserialize_embedding(row["content_embedding"]),
             sentiment=row["sentiment"],
             confidence=row["confidence"],
+            category=category,
             tool_id=row["tool_id"],
             topic_ids=deserialize_json(row["topic_ids"]) or [],
             objective_type=row["objective_type"],

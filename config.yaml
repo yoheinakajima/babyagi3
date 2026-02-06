@@ -4,8 +4,10 @@
 # Owner configuration
 owner:
   id: "${OWNER_ID:owner}"
+  name: "${OWNER_NAME:}"
   email: "${OWNER_EMAIL:}"
   phone: "${OWNER_PHONE:}"
+  timezone: "${OWNER_TIMEZONE:}"
   contacts:
     email: "${OWNER_EMAIL:}"
     phone: "${OWNER_PHONE:}"

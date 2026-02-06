@@ -484,6 +484,7 @@ class Learning:
     # Classification
     sentiment: str = "neutral"  # "positive", "negative", "neutral"
     confidence: float = 0.5  # 0-1, how confident we are in this learning
+    category: str = "general"  # "general", "owner_profile", "agent_self", "tool_feedback"
 
     # Associations (what this learning is about)
     tool_id: str | None = None  # If about a specific tool
@@ -521,7 +522,8 @@ class ExtractedFeedback:
     """Feedback extracted from a user message (before creating Learning)."""
 
     has_feedback: bool = False
-    feedback_type: str | None = None  # "correction", "praise", "preference", "complaint"
+    feedback_type: str | None = None  # "correction", "praise", "preference", "complaint", "profile_info"
+    category: str = "general"  # "general", "owner_profile", "agent_self", "tool_feedback"
     about_tool: str | None = None
     about_objective_type: str | None = None
     about_entity_id: str | None = None
