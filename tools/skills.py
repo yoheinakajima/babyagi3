@@ -375,6 +375,7 @@ def create_composio_tool(tool_def: "ToolDefinition", Tool: type, composio_client
                 slug=tool_def.composio_action,
                 arguments=params,
                 user_id=user_id,
+                dangerously_skip_version_check=True,
             )
             return result
         except Exception as e:
@@ -388,6 +389,7 @@ def create_composio_tool(tool_def: "ToolDefinition", Tool: type, composio_client
                         slug=tool_def.composio_action,
                         arguments=params,
                         user_id=user_id,
+                        dangerously_skip_version_check=True,
                     )
                 except Exception as retry_err:
                     return {"error": f"Composio execution failed after retry: {retry_err}"}
@@ -605,7 +607,7 @@ def _composio_setup_tool(agent: "Agent", Tool: type) -> "Tool":
             if not app:
                 return {"error": "app parameter required for list_actions"}
             try:
-                app_actions = client.tools.get_raw_composio_tools(toolkits=[app])
+                app_actions = client.tools.get_raw_composio_tools(toolkits=[app], limit=500)
                 return {
                     "app": app,
                     "actions": [
@@ -1112,6 +1114,58 @@ def _composio_setup_tool(agent: "Agent", Tool: type) -> "Tool":
                 return {"error": f"Failed to refresh connection: {e}"}
 
         # ═══════════════════════════════════════════════════════════════════
+        # DISCONNECT - Remove expired or unwanted connections
+        # ═══════════════════════════════════════════════════════════════════
+        elif action == "disconnect":
+            if not app and not connection_id:
+                return {"error": "app or connection_id parameter required for disconnect"}
+
+            try:
+                targets = []
+                if connection_id:
+                    targets.append(connection_id)
+                elif app:
+                    # Find all connections for this app (expired + active)
+                    all_accounts = _list_connected_accounts(
+                        user_id, toolkit_slugs=[app.upper()]
+                    )
+                    # Default: only delete expired connections
+                    expired = [a for a in all_accounts if _get_account_status(a) == "EXPIRED"]
+                    if expired:
+                        targets = [_get_account_id(a) for a in expired]
+                    else:
+                        # If no expired, delete all connections for this app
+                        targets = [_get_account_id(a) for a in all_accounts]
+
+                    if not targets:
+                        return {
+                            "status": "not_found",
+                            "app": app,
+                            "message": f"No connections found for {app}.",
+                        }
+
+                deleted = []
+                for target_id in targets:
+                    try:
+                        client.connected_accounts.delete(nanoid=target_id)
+                        deleted.append(target_id)
+                    except Exception as del_err:
+                        logger.debug("Could not delete connection '%s': %s", target_id, del_err)
+
+                return {
+                    "status": "disconnected",
+                    "app": app or "unknown",
+                    "deleted": deleted,
+                    "count": len(deleted),
+                    "message": f"Removed {len(deleted)} connection(s)." + (
+                        f" Use composio_setup(action='connect', app='{app}') to reconnect."
+                        if app else ""
+                    ),
+                }
+            except Exception as e:
+                return {"error": f"Failed to disconnect: {e}"}
+
+        # ═══════════════════════════════════════════════════════════════════
         # ENABLE - Register Composio actions as agent tools
         # ═══════════════════════════════════════════════════════════════════
         elif action == "enable":
@@ -1135,11 +1189,12 @@ def _composio_setup_tool(agent: "Agent", Tool: type) -> "Tool":
                         "suggestion": f"Use: composio_setup(action='connect', app='{app}')"
                     }
 
-                # Get action schemas from Composio
+                # Get action schemas from Composio (use limit=500 to include
+                # read/list/get actions, not just the default subset)
                 if actions:
                     action_list = client.tools.get_raw_composio_tools(tools=actions)
                 else:
-                    action_list = client.tools.get_raw_composio_tools(toolkits=[app])
+                    action_list = client.tools.get_raw_composio_tools(toolkits=[app], limit=500)
 
                 # Pre-populate the SDK's internal schema cache with all fetched tools.
                 # This is critical: tools.execute() needs the schema in _tool_schemas
@@ -1299,13 +1354,14 @@ Examples:
 - composio_setup(action="poll_connection", app="SLACK")
 - composio_setup(action="enable", app="GITHUB")
 - composio_setup(action="refresh_connection", app="GMAIL")  # Refresh expired OAuth
+- composio_setup(action="disconnect", app="ATTIO")  # Remove expired connections
 - composio_setup(action="enable", app="SLACK", actions=["SLACK_SEND_MESSAGE"])""",
         parameters={
             "type": "object",
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["list_apps", "list_actions", "get_auth_params", "check_connections", "connect", "poll_connection", "refresh_connection", "enable", "disable", "status"],
+                    "enum": ["list_apps", "list_actions", "get_auth_params", "check_connections", "connect", "poll_connection", "refresh_connection", "disconnect", "enable", "disable", "status"],
                     "description": "What to do",
                 },
                 "app": {
