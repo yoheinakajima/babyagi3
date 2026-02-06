@@ -74,11 +74,6 @@ Items that need to be addressed before public release. Organized by priority.
 
 ## Medium Priority
 
-### Workflow tool is a stub
-- **Location**: `tools/skills.py:1375`
-- **Issue**: `# TODO: Implement workflow logic` — the workflow creation tool is defined but the execution logic is placeholder.
-- **Impact**: Users can "create" workflows but they don't actually do anything.
-
 ### ~~File search semantic integration~~ (Done)
 - **Location**: `tools/files/__init__.py`, `tools/files/index.py`
 - **Resolution**: Added `FileIndex` class with SQLite-backed embedding storage. File save indexes summary embeddings; search combines semantic similarity (0.7 weight) with keyword matching (0.3 weight). Also added `search_facts` to `QuickRetrieval` and `DeepRetrievalAgent` for fact-level semantic search.
@@ -165,6 +160,5 @@ Items that need to be addressed before public release. Organized by priority.
 - [ ] Add `LICENSE` file
 - [x] Add optional dependency group for voice
 - [x] Remove unused `import asyncio` in `tools/research.py`
-- [ ] Implement workflow tool logic
 - [x] Implement file search semantic integration
 - [ ] Add structured logging
