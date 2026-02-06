@@ -14,6 +14,10 @@ from typing import Any
 
 from anthropic import Anthropic
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 # Cost per token (approximate for claude-sonnet-4-20250514)
 INPUT_COST_PER_TOKEN = 0.003 / 1000  # $3 per million tokens
 OUTPUT_COST_PER_TOKEN = 0.015 / 1000  # $15 per million tokens
@@ -180,7 +184,8 @@ class DocumentProcessor:
                 # Try to read as text, fall back to description
                 try:
                     return path.read_text(encoding="utf-8", errors="replace"), False
-                except Exception:
+                except Exception as e:
+                    logger.debug("Could not read file '%s' as text, treating as binary: %s", path.name, e)
                     return f"[Binary file: {path.name}, {path.stat().st_size} bytes]", False
         except Exception as e:
             return f"[Could not extract text: {e}]", False

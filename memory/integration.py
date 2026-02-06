@@ -10,6 +10,9 @@ This module provides utilities to:
 
 import asyncio
 from datetime import datetime
+import logging
+
+logger = logging.getLogger(__name__)
 
 from .models import Event
 from .learning import (
@@ -87,8 +90,8 @@ def setup_memory_hooks(agent, memory):
             # Update error statistics (safe - won't crash)
             try:
                 memory.store.record_tool_error(tool_name, error_msg, duration_ms)
-            except Exception:
-                pass  # Never crash on stats update
+            except Exception as e:
+                logger.debug("Failed to record tool error stats for '%s': %s", tool_name, e)
         else:
             # Log success event
             result_str = str(result)[:1000]  # Truncate large results
@@ -105,8 +108,8 @@ def setup_memory_hooks(agent, memory):
             # Update success statistics (safe - won't crash)
             try:
                 memory.store.record_tool_success(tool_name, duration_ms)
-            except Exception:
-                pass  # Never crash on stats update
+            except Exception as e:
+                logger.debug("Failed to record tool success stats for '%s': %s", tool_name, e)
 
     @agent.on("tool_registered")
     def on_tool_registered(event):
@@ -167,8 +170,8 @@ def setup_memory_hooks(agent, memory):
                     is_owner=True,
                     metadata={"error": str(e), "phase": "registration"},
                 )
-            except Exception:
-                pass  # Absolute last resort - never crash
+            except Exception as e:
+                logger.warning("Failed to persist tool registration event for '%s': %s", event.get('name', 'unknown'), e)
 
     @agent.on("tool_disabled")
     def on_tool_disabled(event):
@@ -186,8 +189,8 @@ def setup_memory_hooks(agent, memory):
                 is_owner=True,
                 metadata={"reason": reason},
             )
-        except Exception:
-            pass  # Never crash
+        except Exception as e:
+            logger.debug("Failed to log tool disabled event for '%s': %s", event.get("name", "unknown"), e)
 
     @agent.on("objective_start")
     def on_objective_start(event):
@@ -221,8 +224,8 @@ def setup_memory_hooks(agent, memory):
     # Seed agent state and owner entity from config
     try:
         _seed_agent_state(agent.config, memory)
-    except Exception:
-        pass  # Non-critical — agent works without seeding
+    except Exception as e:
+        logger.debug("Could not seed agent state from config: %s", e)
 
     # ═══════════════════════════════════════════════════════════
     # SELF-IMPROVEMENT HOOKS
@@ -231,8 +234,8 @@ def setup_memory_hooks(agent, memory):
     # Ensure user_preferences node exists
     try:
         ensure_user_preferences_node(memory.store)
-    except Exception:
-        pass  # Non-critical
+    except Exception as e:
+        logger.debug("Could not ensure user preferences node: %s", e)
 
     @agent.on("objective_end")
     def on_objective_end_evaluate(event):
@@ -268,7 +271,7 @@ def setup_memory_hooks(agent, memory):
                     memory.store.increment_staleness("user_preferences")
 
             except Exception as e:
-                print(f"Objective evaluation error: {e}")
+                logger.warning("Objective evaluation error: %s", e)
 
         # Run evaluation asynchronously to not block
         try:
@@ -380,7 +383,7 @@ def setup_feedback_extraction(agent, memory):
                 print(f"Extracted learning from feedback: {learning.content[:50]}...")
 
         except Exception as e:
-            print(f"Feedback extraction error: {e}")
+            logger.warning("Feedback extraction error: %s", e)
 
     return extract_feedback_from_message
 

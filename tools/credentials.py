@@ -15,6 +15,9 @@ This separation ensures:
 
 import re
 from tools import tool
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def _generate_secret_ref(service: str, credential_type: str, field: str) -> str:
@@ -232,8 +235,8 @@ def get_credential(
                 # Update last used timestamp
                 agent.memory.store.update_credential_last_used(cred.id)
                 return result
-        except Exception:
-            pass  # Fall back to keyring-only lookup
+        except Exception as e:
+            logger.debug("Could not retrieve credential for '%s' from database, falling back to keyring: %s", service, e)
 
     # Fallback: check keyring directly
     password_ref = _generate_secret_ref(service, credential_type or "account", "password")
@@ -306,8 +309,8 @@ def list_credentials(agent=None) -> dict:
                     "credentials": credentials,
                     "note": "Use get_credential(service, include_secrets=True) to retrieve passwords/card numbers"
                 }
-        except Exception:
-            pass  # Fall back to keyring-only
+        except Exception as e:
+            logger.debug("Could not list credentials from database, falling back to keyring: %s", e)
 
     # Fallback: scan keyring
     try:
@@ -333,8 +336,8 @@ def list_credentials(agent=None) -> dict:
                             "service": service,
                             "credential_type": cred_type,
                         })
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Could not scan keyring for credentials: %s", e)
 
     return {
         "count": len(credentials),
@@ -462,8 +465,8 @@ def delete_credential(service: str, credential_type: str = None, agent=None) -> 
             if cred:
                 agent.memory.store.delete_credential(cred.id)
                 deleted.append("database")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Could not delete credential for '%s' from database: %s", service, e)
 
     # Delete from keyring
     for ctype in types_to_check:
@@ -472,24 +475,24 @@ def delete_credential(service: str, credential_type: str = None, agent=None) -> 
         try:
             keyring.delete_password(KEYRING_SERVICE, password_ref)
             deleted.append(f"{ctype}:password")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Could not delete password from keyring for '%s': %s", service, e)
 
         # Try to delete card
         card_ref = _generate_secret_ref(service, ctype, "card")
         try:
             keyring.delete_password(KEYRING_SERVICE, card_ref)
             deleted.append(f"{ctype}:card")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Could not delete card from keyring for '%s': %s", service, e)
 
         # Try to delete CVV
         cvv_ref = _generate_secret_ref(service, ctype, "cvv")
         try:
             keyring.delete_password(KEYRING_SERVICE, cvv_ref)
             deleted.append(f"{ctype}:cvv")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Could not delete CVV from keyring for '%s': %s", service, e)
 
     if deleted:
         return {"deleted": True, "service": service, "removed": deleted}

@@ -20,6 +20,10 @@ from datetime import datetime
 
 from tools import tool, tool_error
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 from .storage import FileStorage
 from .processor import DocumentProcessor
 from .creators import (
@@ -170,8 +174,8 @@ def _action_save(
     elif _is_base64(content):
         try:
             content = base64.b64decode(content)
-        except Exception:
-            pass  # Not base64, treat as text
+        except Exception as e:
+            logger.debug("Content looked like base64 but failed to decode, treating as text: %s", e)
 
     # Get existing projects for context
     existing_projects = storage.list_projects()
@@ -452,7 +456,8 @@ def _is_base64(s: str) -> bool:
         # Check if it decodes and re-encodes to same
         decoded = base64.b64decode(s, validate=True)
         return len(decoded) > 0
-    except Exception:
+    except Exception as e:
+        logger.debug("Base64 validation failed: %s", e)
         return False
 
 

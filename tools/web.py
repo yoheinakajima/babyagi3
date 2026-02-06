@@ -22,6 +22,10 @@ import sys
 import time
 from tools import tool, tool_error
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 # Browser Use Cloud API configuration
 BROWSER_USE_API_URL = "https://api.browser-use.com/api/v2"
 
@@ -215,8 +219,8 @@ def browse(
                                 headers=headers,
                                 json={"status": "stopped"}
                             )
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug("Failed to stop browser session %s: %s", returned_session_id, e)
 
                     result = {
                         "task": task,
@@ -287,8 +291,8 @@ def _get_credential_secrets(service: str, credential_type: str = None, agent=Non
     if agent and hasattr(agent, 'memory') and agent.memory is not None:
         try:
             cred = agent.memory.store.get_credential(service, credential_type)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Could not retrieve credential for '%s' from memory store: %s", service, e)
 
     if cred:
         metadata["found"] = True
@@ -341,8 +345,8 @@ def _get_credential_secrets(service: str, credential_type: str = None, agent=Non
         if agent and hasattr(agent, 'memory') and agent.memory is not None:
             try:
                 agent.memory.store.update_credential_last_used(cred.id)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Could not update last-used timestamp for credential: %s", e)
     else:
         # Fallback: try direct keyring lookup
         password_ref = _generate_secret_ref(service, credential_type or "account", "password")
@@ -516,8 +520,8 @@ def browse_with_credentials(
                                 headers=headers,
                                 json={"status": "stopped"}
                             )
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug("Failed to stop browser session %s: %s", returned_session_id, e)
 
                     # Return result with SAFE metadata only (no actual credentials)
                     result = {
@@ -731,8 +735,8 @@ def browse_checkout(
                                 headers=headers,
                                 json={"status": "stopped"}
                             )
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug("Failed to stop browser session %s: %s", returned_session_id, e)
 
                     # Return SAFE result - no card details
                     return {
@@ -755,8 +759,8 @@ def browse_checkout(
                                 headers=headers,
                                 json={"status": "stopped"}
                             )
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug("Failed to stop browser session %s: %s", returned_session_id, e)
 
                     return {
                         "checkout_url": checkout_url,
@@ -917,7 +921,8 @@ def browse_control(action: str, task_id: str = None) -> dict:
                                             stopped.append(tid)
                                         else:
                                             failed.append(tid)
-                                    except Exception:
+                                    except Exception as e:
+                                        logger.debug("Failed to stop browser task %s: %s", tid, e)
                                         failed.append(tid)
 
                             return {

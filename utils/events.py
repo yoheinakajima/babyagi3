@@ -27,7 +27,10 @@ Usage:
     agent.on("tool_start", lambda e: print(f"Running {e['name']}..."))
 """
 
+import logging
 from typing import Callable, Any
+
+logger = logging.getLogger(__name__)
 
 
 class EventEmitter:
@@ -111,15 +114,14 @@ class EventEmitter:
             try:
                 handler(data)
             except Exception as e:
-                # Don't let handler errors crash the agent
-                pass
+                logger.debug("Event handler error for '%s': %s", event, e)
 
         # Call wildcard handlers
         for handler in self._event_handlers.get('*', []):
             try:
                 handler(data)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Wildcard event handler error: %s", e)
 
     def once(self, event: str, handler: Callable[[dict[str, Any]], None]) -> Callable:
         """

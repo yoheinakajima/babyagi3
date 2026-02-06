@@ -32,9 +32,12 @@ Usage:
     response = client.completion(messages=[...], model="gpt-4o")  # Same interface!
 """
 
+import logging
 import time
 from contextlib import contextmanager
 from typing import Any, Literal
+
+logger = logging.getLogger(__name__)
 
 from .costs import calculate_cost, calculate_embedding_cost, estimate_tokens
 
@@ -554,8 +557,8 @@ class InstrumentedLiteLLM:
                 input_tokens = getattr(usage, "prompt_tokens", 0) or 0
                 output_tokens = getattr(usage, "completion_tokens", 0) or 0
                 return input_tokens, output_tokens
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Could not extract token usage from response: %s", e)
         return 0, 0
 
     def _extract_stop_reason(self, response: Any) -> str:
@@ -563,8 +566,8 @@ class InstrumentedLiteLLM:
         try:
             if response.choices:
                 return response.choices[0].finish_reason or "unknown"
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Could not extract stop reason from response: %s", e)
         return "unknown"
 
     def completion(

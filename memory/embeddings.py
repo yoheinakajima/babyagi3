@@ -29,6 +29,10 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 from metrics import InstrumentedOpenAI, InstrumentedLiteLLMEmbeddings
 
 # Default embedding model
@@ -494,8 +498,8 @@ def _create_provider() -> EmbeddingProvider:
             provider = LocalEmbeddings()
             provider.model  # Test
             return provider
-        except Exception:
-            pass  # Fall through to other options
+        except Exception as e:
+            logger.debug("Local embeddings unavailable: %s", e)
 
     # Try LiteLLM only if we have the right API key for the model
     # OpenAI embedding models require OPENAI_API_KEY
@@ -504,8 +508,8 @@ def _create_provider() -> EmbeddingProvider:
             provider = LiteLLMEmbeddings(model=embedding_model)
             provider.client  # Test that it works
             return provider
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("LiteLLM embeddings unavailable for model '%s': %s", embedding_model, e)
 
     # Fall back to direct OpenAI if key is available
     if os.environ.get("OPENAI_API_KEY"):
@@ -513,8 +517,8 @@ def _create_provider() -> EmbeddingProvider:
             provider = OpenAIEmbeddings(model="text-embedding-3-small")
             provider.client  # This will raise if there's an issue
             return provider
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("OpenAI embeddings unavailable: %s", e)
 
     # Try Voyage (Anthropic's recommended embedding provider)
     if os.environ.get("VOYAGE_API_KEY"):
@@ -522,16 +526,16 @@ def _create_provider() -> EmbeddingProvider:
             provider = AnthropicVoyageEmbeddings()
             provider.client  # Test
             return provider
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Voyage embeddings unavailable: %s", e)
 
     # Try local embeddings as fallback (works without API key)
     try:
         provider = LocalEmbeddings()
         provider.model  # Test
         return provider
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Local embeddings fallback unavailable: %s", e)
 
     # Fall back to mock embeddings (always works)
     return MockEmbeddings()

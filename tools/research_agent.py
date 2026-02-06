@@ -12,6 +12,10 @@ The research agent has:
 
 from tools import tool, tool_error
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 # Research agent system prompt - provides context and patterns
 RESEARCH_AGENT_PROMPT = '''You are a specialized Research Agent for long-running batch data operations.
 
@@ -275,8 +279,8 @@ def research_status(
                 agent
             )
             result["task"] = task_result
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Could not check research task status for task '%s': %s", task_id, e)
 
     # Get research progress
     progress = research_progress()

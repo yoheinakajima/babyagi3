@@ -6,9 +6,12 @@ Create various file types: CSV, images, PDFs, Word docs, etc.
 
 import io
 import json
+import logging
 from pathlib import Path
 from typing import Any
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 
 def create_csv(
@@ -120,10 +123,12 @@ def create_image(
                 # Try to load a font, fall back to default
                 try:
                     font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", size)
-                except Exception:
+                except Exception as e:
+                    logger.debug("Could not load TrueType font, falling back to default: %s", e)
                     try:
                         font = ImageFont.load_default()
-                    except Exception:
+                    except Exception as e2:
+                        logger.debug("Could not load default font: %s", e2)
                         font = None
 
                 draw.text((x, y), text, fill=color, font=font)
