@@ -161,6 +161,8 @@ class Console:
         self._verbose_level = self._load_verbose_level()
         self._use_color = _supports_color()
         self._filter_categories: set[str] | None = None  # None = all categories
+        self._awaiting_input = False
+        self._pending_logs: list[str] = []
 
     def _load_verbose_level(self) -> VerboseLevel:
         """Load verbose level from environment. Defaults to LIGHT."""
@@ -212,7 +214,23 @@ class Console:
 
     def user_prompt(self) -> str:
         """Get styled user input prompt string."""
-        return self._colorize("You: ", Colors.BOLD, Colors.GREEN)
+        return self._colorize("> ", Colors.BOLD, Colors.GREEN)
+
+    def begin_input(self):
+        """Signal that we're waiting for user input. Verbose logs will be buffered."""
+        self._awaiting_input = True
+        self._pending_logs = []
+
+    def end_input(self):
+        """Signal that user input has been received. Stop buffering logs."""
+        self._awaiting_input = False
+
+    def flush_pending_logs(self):
+        """Print any verbose logs that were buffered during input waiting."""
+        if self._pending_logs:
+            for log_line in self._pending_logs:
+                print(log_line, file=sys.stderr, flush=True)
+            self._pending_logs = []
 
     def agent(self, text: str, prefix: str = "Assistant"):
         """Print agent response."""
@@ -266,7 +284,10 @@ class Console:
         else:
             styled = self._colorize(f"    {text}", Colors.DIM, Colors.BRIGHT_BLACK)
 
-        print(styled, file=sys.stderr, flush=True)
+        if self._awaiting_input:
+            self._pending_logs.append(styled)
+        else:
+            print(styled, file=sys.stderr, flush=True)
 
     def tool_start(self, name: str, inputs: dict[str, Any] = None):
         """Log tool execution start."""

@@ -7,6 +7,7 @@ Subscribes to agent events for verbose output display.
 
 import asyncio
 import logging
+import sys
 
 from utils.console import console
 
@@ -105,10 +106,18 @@ Be concise. Mention what you can help with based on available tools. If any tool
     # Main REPL loop
     while True:
         try:
-            # Print prompt to stderr for immediate visibility in workflow console
-            import sys
+            # Buffer verbose logs while waiting for input so they don't
+            # push the prompt away from where the user types.
+            console.begin_input()
             print(console.user_prompt(), end="", file=sys.stderr, flush=True)
-            user_input = await asyncio.to_thread(input)
+            try:
+                user_input = await asyncio.to_thread(input)
+            except KeyboardInterrupt:
+                console.end_input()
+                print("", file=sys.stderr)
+                continue
+            console.end_input()
+            console.flush_pending_logs()
             user_input = user_input.strip()
 
             # Check for verbose toggle commands
@@ -140,10 +149,12 @@ Be concise. Mention what you can help with based on available tools. If any tool
 
         except EOFError:
             # Handle Ctrl+D
+            console.end_input()
             console.system("\nGoodbye!")
             break
         except Exception as e:
             # Catch any unexpected errors in the REPL loop
+            console.end_input()
             logger.exception(f"Unexpected error in REPL loop: {e}")
             console.system(f"Unexpected error: {e}")
     
