@@ -31,10 +31,10 @@ class ToolContextConfig:
     """Configuration for tool context building."""
 
     # Maximum tools to include in API calls
-    max_active_tools: int = 15
+    max_active_tools: int = 25
 
     # Allocation of tool slots
-    core_tools_reserved: int = 6  # Core tools always included
+    core_tools_reserved: int = 20  # Core + default tools always included
     most_used_slots: int = 3  # High-usage tools
     recent_slots: int = 3  # Recently used tools
     relevant_slots: int = 3  # Contextually relevant tools
@@ -50,7 +50,7 @@ class ToolContextConfig:
     summary_token_budget: int = 500
 
 
-# Core tools that are always included
+# Core tools that are always included (agent fundamentals)
 CORE_TOOLS = frozenset([
     "memory",
     "objective",
@@ -58,6 +58,30 @@ CORE_TOOLS = frozenset([
     "schedule",
     "register_tool",
     "send_message",
+])
+
+# Default tools that should always be available alongside core tools.
+# These represent the agent's standard capabilities (email, meetings, web)
+# and must be included regardless of usage history or query relevance,
+# otherwise the agent won't know it can use them.
+DEFAULT_TOOLS = frozenset([
+    # Meeting tools (Recall.ai)
+    "join_meeting",
+    "get_meeting_status",
+    "leave_meeting",
+    "get_meeting_transcript",
+    "list_meeting_bots",
+    "search_meeting_memories",
+    "configure_meeting_bot",
+    # Email tools (AgentMail)
+    "send_email",
+    "check_inbox",
+    "read_email",
+    "get_agent_email",
+    # Web tools
+    "web_search",
+    # Calendar tools
+    "get_calendar_events",
 ])
 
 
@@ -176,8 +200,9 @@ class ToolContextBuilder:
         return selection
 
     def _select_core_tools(self, all_tools: dict) -> set[str]:
-        """Select core tools that are always included."""
-        return {name for name in CORE_TOOLS if name in all_tools}
+        """Select core and default tools that are always included."""
+        always_include = CORE_TOOLS | DEFAULT_TOOLS
+        return {name for name in always_include if name in all_tools}
 
     def _get_tool_stats(self) -> dict[str, dict]:
         """Get tool statistics from database."""
@@ -310,6 +335,8 @@ class ToolContextBuilder:
         """Get category for a tool."""
         if name in CORE_TOOLS:
             return "core"
+        if name in DEFAULT_TOOLS:
+            return "default"
         stats = tool_stats.get(name, {})
         return stats.get("category", "custom")
 
@@ -340,10 +367,10 @@ class ToolContextBuilder:
                 by_category[category] = []
             by_category[category].append((name, first_sentence, usage))
 
-        # Sort categories: core first, then by tool count
+        # Sort categories: core first, then default, then by tool count
         sorted_categories = sorted(
             by_category.keys(),
-            key=lambda c: (0 if c == "core" else 1, -len(by_category[c])),
+            key=lambda c: (0 if c == "core" else 1 if c == "default" else 2, -len(by_category[c])),
         )
 
         # Build summary

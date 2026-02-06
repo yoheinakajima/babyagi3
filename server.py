@@ -366,6 +366,10 @@ async def sendblue_webhook(
 # Recall.ai Webhooks
 # =============================================================================
 
+# Track bot IDs that have already been processed to prevent duplicate
+# post-meeting processing (multiple status webhooks fire for the same bot)
+_recall_processed_bots: set[str] = set()
+
 @app.websocket("/webhooks/recall/realtime")
 async def recall_realtime_websocket(websocket: WebSocket):
     """
@@ -492,8 +496,24 @@ async def recall_status_webhook(
     logger.debug(f"Recall status webhook payload: {payload}")
     console.activity("recall", f"bot {bot_short} → {status or 'unknown'}")
 
-    # Handle meeting end - trigger post-meeting processing
-    if status in ("call_ended", "done", "analysis_done"):
+    # Handle meeting end - trigger post-meeting processing.
+    # Only process on "done" or "analysis_done" (not "call_ended" which fires
+    # before the transcript is ready and causes 400 errors from Recall.ai).
+    if status in ("done", "analysis_done"):
+        global _recall_processed_bots
+
+        # Deduplicate: skip if this bot has already been processed
+        # (both "done" and "analysis_done" can fire for the same bot)
+        if bot_id and bot_id in _recall_processed_bots:
+            logger.debug(f"Recall: skipping duplicate processing for bot {bot_id}")
+            return {"status": "ok", "message": "already_processed"}
+
+        if bot_id:
+            _recall_processed_bots.add(bot_id)
+            # Cap the set size to prevent unbounded growth
+            if len(_recall_processed_bots) > 1000:
+                _recall_processed_bots = set(list(_recall_processed_bots)[-500:])
+
         async def process_meeting_end():
             try:
                 from tools.meeting import get_meeting_processor, RecallClient
@@ -501,14 +521,32 @@ async def recall_status_webhook(
                 processor = get_meeting_processor()
                 client = RecallClient()
 
+                # Check bot details first to verify it actually recorded
+                bot_data = await client.get_bot(bot_id)
+                if "error" in bot_data:
+                    logger.error(f"Failed to fetch bot details for {bot_id}: {bot_data}")
+                    return
+
+                # Check if the bot ever reached recording status.
+                # If it was stuck in waiting room or rejected, there's no transcript.
+                status_changes = bot_data.get("status_changes", [])
+                ever_recorded = any(
+                    sc.get("code") == "in_call_recording" or sc.get("sub_code") == "in_call_recording"
+                    for sc in status_changes
+                )
+                if not ever_recorded:
+                    logger.warning(
+                        f"Bot {bot_id} never reached recording status, skipping transcript fetch. "
+                        f"Status history: {[sc.get('code') for sc in status_changes]}"
+                    )
+                    return
+
                 # Fetch full transcript
                 transcript_data = await client.get_bot_transcript(bot_id)
                 if "error" in transcript_data:
                     logger.error(f"Failed to fetch transcript for bot {bot_id}: {transcript_data}")
                     return
 
-                # Get bot details for metadata
-                bot_data = await client.get_bot(bot_id)
                 meeting_metadata = {
                     "title": bot_data.get("meeting_metadata", {}).get("title", "Meeting"),
                     "platform": bot_data.get("meeting_url", "").split("/")[2] if bot_data.get("meeting_url") else None,
