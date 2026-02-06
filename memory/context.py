@@ -584,12 +584,13 @@ def _build_user_preferences(
 def _build_learnings_context(
     event: Event | None, store, config: ContextConfig, metrics: dict
 ) -> list[dict]:
-    """Build context-specific learnings based on current event."""
+    """Build context-specific learnings based on current event.
+
+    When no event is provided (e.g., session start), includes high-confidence
+    negative learnings to prevent repeating known mistakes.
+    """
     budget = config.token_budgets.get("learnings", 200)
     learnings = []
-
-    if not event:
-        return []
 
     try:
         # Import here to avoid circular imports
@@ -597,29 +598,46 @@ def _build_learnings_context(
 
         retriever = LearningRetriever(store)
 
-        # If using a specific tool, get tool-specific learnings
-        if event.tool_id:
-            tool_learnings = retriever.get_for_tool(event.tool_id, limit=3)
-            for l in tool_learnings:
-                learnings.append({
-                    "type": "tool",
-                    "tool": event.tool_id,
-                    "learning": l.content[:200],
-                    "recommendation": l.recommendation[:100] if l.recommendation else None,
-                })
+        if event:
+            # If using a specific tool, get tool-specific learnings
+            if event.tool_id:
+                tool_learnings = retriever.get_for_tool(event.tool_id, limit=3)
+                for l in tool_learnings:
+                    learnings.append({
+                        "type": "tool",
+                        "tool": event.tool_id,
+                        "learning": l.content[:200],
+                        "recommendation": l.recommendation[:100] if l.recommendation else None,
+                    })
+                    store.record_learning_applied(l.id)
 
-        # If this looks like an objective start, get similar objective learnings
-        if event.event_type in ["objective_start", "task_created"]:
-            obj_learnings = retriever.get_for_objective(event.content, limit=3)
-            for l in obj_learnings:
-                # Avoid duplicates from tool learnings
-                if l.tool_id and event.tool_id and l.tool_id == event.tool_id:
-                    continue
-                learnings.append({
-                    "type": "objective",
-                    "learning": l.content[:200],
-                    "recommendation": l.recommendation[:100] if l.recommendation else None,
-                })
+            # If this looks like an objective start, get similar objective learnings
+            if event.event_type in ["objective_start", "task_created"]:
+                obj_learnings = retriever.get_for_objective(event.content, limit=3)
+                for l in obj_learnings:
+                    # Avoid duplicates from tool learnings
+                    if l.tool_id and event.tool_id and l.tool_id == event.tool_id:
+                        continue
+                    learnings.append({
+                        "type": "objective",
+                        "learning": l.content[:200],
+                        "recommendation": l.recommendation[:100] if l.recommendation else None,
+                    })
+                    store.record_learning_applied(l.id)
+        else:
+            # Session start: surface high-confidence negative learnings
+            # to prevent repeating known mistakes
+            negative_learnings = store.find_learnings(
+                sentiment="negative", limit=5
+            )
+            for l in negative_learnings:
+                if l.confidence and l.confidence >= 0.6:
+                    learnings.append({
+                        "type": "session_review",
+                        "learning": l.content[:200],
+                        "recommendation": l.recommendation[:100] if l.recommendation else None,
+                    })
+                    store.record_learning_applied(l.id)
 
     except Exception as e:
         # Don't fail context assembly if learnings fail

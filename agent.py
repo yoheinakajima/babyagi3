@@ -20,7 +20,7 @@ import logging
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Callable, Protocol, runtime_checkable
 
@@ -112,6 +112,8 @@ class Objective:
     retry_count: int = 0
     max_retries: int = 3
     last_error: str | None = None
+    # Error history for retry awareness
+    error_history: list = field(default_factory=list)
     # Budget tracking
     budget_usd: float | None = None  # Max cost allowed (None = unlimited)
     spent_usd: float = 0.0
@@ -957,6 +959,43 @@ Work autonomously. Use tools as needed. When done, provide a brief summary of wh
 
                 thread.append({"role": "user", "content": tool_results})
 
+    def _build_objective_prompt(self, obj: "Objective") -> str:
+        """Build a structured objective prompt with planning, verification, and error awareness.
+
+        Includes:
+        - Planning step (break goal into steps before executing)
+        - Verification step (confirm work achieves the goal before finishing)
+        - Re-plan instruction (stop and re-plan if approach isn't working)
+        - Elegance check (consider simpler approaches for non-trivial work)
+        - Error history (on retries, include previous errors so approach can adapt)
+        """
+        # Base objective with planning structure
+        parts = [f"Complete this objective: {obj.goal}"]
+
+        # If retrying, include error history so the agent can adapt
+        if obj.error_history:
+            error_lines = "\n".join(
+                f"- Attempt {i + 1}: {e}" for i, e in enumerate(obj.error_history)
+            )
+            parts.append(f"""
+PREVIOUS ATTEMPTS FAILED:
+{error_lines}
+
+Adjust your approach to avoid repeating these errors. Consider a different strategy.""")
+
+        # Planning and verification instructions
+        parts.append("""
+APPROACH:
+1. PLAN: Break this into concrete steps. Identify what tools and information you need.
+2. EXECUTE: Work through your plan step by step. Use the notes tool to track your plan and mark steps complete.
+3. VERIFY: Before finishing, confirm your work actually achieves the goal. Check outputs, results, and correctness.
+4. If something isn't working after 2-3 attempts at a step, stop and re-plan with a different approach.
+5. For non-trivial solutions, briefly consider if there's a simpler or more elegant approach before finalizing.
+
+Work autonomously. When done, provide a summary of what was accomplished and how it was verified.""")
+
+        return "\n".join(parts)
+
     async def run_objective(self, objective_id: str):
         """Execute an objective in the background with concurrency control and retry logic."""
         obj = self.objectives.get(objective_id)
@@ -993,9 +1032,7 @@ Work autonomously. Use tools as needed. When done, provide a brief summary of wh
 
             try:
                 # Run the objective with its own thread
-                prompt = f"""Complete this objective: {obj.goal}
-
-Work autonomously. Use tools as needed. When done, provide a final summary."""
+                prompt = self._build_objective_prompt(obj)
 
                 result = await self.run_async(prompt, obj.thread_id)
 
@@ -1035,6 +1072,7 @@ Work autonomously. Use tools as needed. When done, provide a final summary."""
 
             except Exception as e:
                 obj.last_error = str(e)
+                obj.error_history.append(str(e))
                 obj.retry_count += 1
 
                 if obj.retry_count < obj.max_retries:
@@ -1294,6 +1332,12 @@ DISTINGUISHING ACCOUNT OWNERSHIP:
 - "Help me create an account" / "Sign me up" / "Use my email" → Ask owner for their email
 - "Create an account for me" from owner → Clarify: "Should I use my agent email, or would you like to provide your personal email?"
 
+WORKING PRINCIPLES:
+- **Simplicity first**: Make every change as simple as possible. Impact minimal code and resources.
+- **Find root causes**: Investigate and fix underlying issues. No temporary workarounds or band-aids.
+- **Minimal impact**: Only touch what's necessary to accomplish the goal. Avoid introducing side effects.
+- **Verify before done**: Never consider a task complete without confirming it actually works.
+
 CAPABILITIES:
 
 1. **Direct Response**: Answer questions and have conversations normally.
@@ -1402,6 +1446,7 @@ OBJECTIVE BEST PRACTICES:
 - **Low priority** (7-10): Nice-to-have, exploratory tasks
 - **Budget limits**: Set budget_usd for expensive operations to prevent runaway costs
 - **Token limits**: Set token_limit for tasks that might generate excessive output
+- **Decompose complex work**: If an objective involves multiple independent phases (e.g., research + analysis + report), consider spawning sub-objectives for parts that can run in parallel. Keep each sub-objective focused on one deliverable.
 
 Example objective with controls:
 - objective(action="spawn", goal="Research competitors", priority=2, budget_usd=0.50, max_retries=5)
