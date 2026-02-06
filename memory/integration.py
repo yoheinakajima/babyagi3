@@ -395,7 +395,7 @@ def setup_feedback_extraction(agent, memory):
                 memory.store.create_learning(learning)
                 # Trigger preference summary update
                 memory.store.increment_staleness("user_preferences")
-                print(f"Extracted learning from feedback: {learning.content[:50]}...")
+                logger.debug("Extracted learning from feedback: %s...", learning.content[:50])
 
         except Exception as e:
             logger.warning("Feedback extraction error: %s", e)
@@ -423,7 +423,7 @@ async def refresh_user_preferences(memory):
         return new_summary
 
     except Exception as e:
-        print(f"Preference refresh error: {e}")
+        logger.warning("Preference refresh error: %s", e)
         return None
 
 
@@ -962,9 +962,9 @@ def create_summary_refresh_task(memory, interval_seconds: int = 300):
             try:
                 count = await memory.refresh_stale_summaries(threshold=10)
                 if count > 0:
-                    print(f"Refreshed {count} stale summaries")
+                    logger.info("Refreshed %d stale summaries", count)
             except Exception as e:
-                print(f"Summary refresh error: {e}")
+                logger.warning("Summary refresh error: %s", e)
 
             await asyncio.sleep(interval_seconds)
 

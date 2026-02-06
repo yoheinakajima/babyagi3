@@ -17,12 +17,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import uuid
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Callable, Literal
+
+logger = logging.getLogger(__name__)
 
 # Optional: croniter for full cron support, falls back to simple patterns
 try:
@@ -504,7 +507,7 @@ class Scheduler:
                 break
             except Exception as e:
                 # Log error but keep running
-                print(f"Scheduler error: {e}")
+                logger.error("Scheduler error: %s", e)
                 await asyncio.sleep(60)
 
     def _next_wake_time(self) -> datetime | None:

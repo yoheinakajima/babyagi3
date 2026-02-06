@@ -2,12 +2,6 @@
 
 Extended design documents and architectural notes that go beyond inline code comments.
 
-## Files
-
-| File | Purpose |
-|------|---------|
-| [`DESIGN_SELF_IMPROVEMENT.md`](DESIGN_SELF_IMPROVEMENT.md) | Full design specification for the self-improvement/learning system |
-
 ## Related Documentation
 
 The main documentation lives at the project root:
@@ -17,3 +11,5 @@ The main documentation lives at the project root:
 - [`../MODELS.md`](../MODELS.md) — Data model reference
 - [`../RUNNING.md`](../RUNNING.md) — Manual code running examples
 - [`../TODO.md`](../TODO.md) — Open items before open source release
+
+The self-improvement/learning system is documented in [`../memory/README.md`](../memory/README.md#self-improvement-system).

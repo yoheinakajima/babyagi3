@@ -5,8 +5,11 @@ Handles summary generation, updates, and staleness propagation.
 """
 
 import heapq
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 from metrics import LiteLLMAnthropicAdapter, track_source, get_model_for_use_case
 from .embeddings import get_embedding
@@ -182,7 +185,7 @@ class SummaryManager:
                 await self.refresh_node(node)
                 refreshed += 1
             except Exception as e:
-                print(f"Failed to refresh summary {node.key}: {e}")
+                logger.warning("Failed to refresh summary %s: %s", node.key, e)
 
         return refreshed
 
@@ -201,7 +204,7 @@ class SummaryManager:
                 await self.refresh_node(node)
                 refreshed += 1
             except Exception as e:
-                print(f"Failed to refresh summary {node.key}: {e}")
+                logger.warning("Failed to refresh summary %s: %s", node.key, e)
 
         return refreshed
 
@@ -424,7 +427,7 @@ Overview:"""
             try:
                 await self.refresh_node(node)
             except Exception as e:
-                print(f"Failed to create initial summary for {node.key}: {e}")
+                logger.warning("Failed to create initial summary for %s: %s", node.key, e)
 
     def get_recent_summary(self, limit: int = 10) -> str:
         """

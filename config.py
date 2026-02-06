@@ -4,9 +4,12 @@ Configuration loader for BabyAGI.
 Loads configuration from YAML file with environment variable substitution.
 """
 
+import logging
 import os
 import re
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 def load_config(config_path: str = None) -> dict:
@@ -31,8 +34,7 @@ def load_config(config_path: str = None) -> dict:
     try:
         import yaml
     except ImportError:
-        print("Warning: PyYAML not installed. Using default config.")
-        print("Install with: pip install pyyaml")
+        logger.warning("PyYAML not installed. Using default config. Install with: pip install pyyaml")
         return _default_config()
 
     with open(path) as f:

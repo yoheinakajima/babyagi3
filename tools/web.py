@@ -24,6 +24,8 @@ from tools import tool, tool_error
 
 import logging
 
+from utils.console import console
+
 logger = logging.getLogger(__name__)
 
 # Browser Use Cloud API configuration
@@ -53,8 +55,8 @@ def _show_live_url(url: str, task: str):
     if sys.stderr.isatty():
         # Truncate task for display
         short_task = task[:50] + "..." if len(task) > 50 else task
-        print(f"\033[36m🌐 Browser session: {url}\033[0m", file=sys.stderr, flush=True)
-        print(f"\033[36m   Task: {short_task}\033[0m", file=sys.stderr, flush=True)
+        console.system(f"Browser session: {url}")
+        console.system(f"   Task: {short_task}")
 
 
 @tool(packages=["ddgs"])

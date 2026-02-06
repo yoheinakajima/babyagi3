@@ -708,6 +708,68 @@ flowchart TB
 
 ---
 
+## Logging Strategy
+
+BabyAGI uses a **two-tier logging architecture** that separates operational logging from user-facing output. This is by design — the agent serves interactive users who need clean, styled output while operators need standard Python logging for debugging.
+
+### Tier 1: Python Standard Logging (Operational)
+
+Every module uses `logging.getLogger(__name__)` for internal operational messages.
+
+**Configuration** (`main.py`):
+- Single `StreamHandler` writing to `stderr`
+- Format: `%(asctime)s - %(name)s - %(levelname)s - %(message)s`
+- Default level: `WARNING` (only warnings and errors)
+- Deep verbose mode: `INFO` and above
+- Noisy libraries suppressed: `httpx`, `primp` forced to `WARNING`
+
+**Level guidelines**:
+| Level | Use for | Example |
+|-------|---------|---------|
+| `DEBUG` | Internal state useful for development | Tool context building, learning extraction details |
+| `INFO` | Significant operational events | Scheduler task execution, channel startup, summary refresh counts |
+| `WARNING` | Recoverable errors, degraded operation | Embedding fallback, failed extractions, missing config |
+| `ERROR` | Failures that affect functionality | Scheduler loop errors, webhook processing failures |
+| `EXCEPTION` | Errors where traceback is needed | Unexpected failures in greeting generation |
+
+**Adding logging to a new module**:
+```python
+import logging
+logger = logging.getLogger(__name__)
+```
+
+No further configuration needed — the root handler in `main.py` picks it up.
+
+### Tier 2: Console Output (User-Facing)
+
+User-visible output goes through `utils/console.py`, which provides colored, styled terminal output with three verbose levels.
+
+**When to use `console.*` vs `logger.*`**:
+| Scenario | Use | Method |
+|----------|-----|--------|
+| User typed something | `console` | `console.user(text)` |
+| Agent responding | `console` | `console.agent(text)` |
+| Tool started/finished | `console` | `console.tool_start(name)` |
+| Status message for user | `console` | `console.system(text)` |
+| Error the user should see | `console` | `console.error(text)` |
+| Internal operation failed | `logger` | `logger.warning("msg: %s", e)` |
+| Debug/diagnostic info | `logger` | `logger.debug("details: %s", val)` |
+| Background event completed | `logger` | `logger.info("refreshed %d items", n)` |
+
+**Verbose levels** (controlled by `BABYAGI_VERBOSE` env var or `/verbose` command):
+- **OFF (0)**: Only user/agent messages
+- **LIGHT (1)**: Key operations — tool names, task starts, objective status
+- **DEEP (2)**: Full details — tool inputs/outputs, memory operations; also enables Python `INFO`-level logging
+
+### What NOT to Do
+
+- **Never use `print()` for error handling.** Use `logger.warning()` or `logger.error()`.
+- **Never use `print()` with raw ANSI codes.** Use `console.*` methods which handle color support detection.
+- **Never use f-strings in logger calls.** Use `%s`/`%d` formatting: `logger.warning("failed: %s", e)` — this avoids formatting the string when the log level is suppressed.
+- **`print()` is acceptable only for**: the standalone REPL (`agent.py` main), the Console class internals (`utils/console.py`), and fatal startup errors before exit.
+
+---
+
 ## Folder Documentation
 
 Each subsystem has its own detailed README:

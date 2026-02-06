@@ -5,8 +5,11 @@ Builds context deterministically from pre-computed summaries.
 No LLM calls required at assembly time.
 """
 
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 from .models import AgentState, AssembledContext, Event
 
@@ -620,7 +623,7 @@ def _build_learnings_context(
 
     except Exception as e:
         # Don't fail context assembly if learnings fail
-        print(f"Error building learnings context: {e}")
+        logger.warning("Error building learnings context: %s", e)
 
     # Limit total learnings to fit budget
     max_learnings = budget // 50  # Rough estimate of tokens per learning

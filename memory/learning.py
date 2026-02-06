@@ -6,8 +6,11 @@ learnings for context, and summarizes them into user preferences.
 """
 
 import json
+import logging
 from datetime import datetime
 from uuid import uuid4
+
+logger = logging.getLogger(__name__)
 
 from metrics import LiteLLMAnthropicAdapter, track_source, get_model_for_use_case
 from .embeddings import get_embedding
@@ -217,7 +220,7 @@ Return only valid JSON, no other text."""
             )
 
         except Exception as e:
-            print(f"Feedback extraction error: {e}")
+            logger.warning("Feedback extraction error: %s", e)
             return ExtractedFeedback()
 
 
@@ -449,7 +452,7 @@ Return only valid JSON, no other text."""
             return {"should_remember": False}
 
         except Exception as e:
-            print(f"Objective evaluation error: {e}")
+            logger.warning("Objective evaluation error: %s", e)
             return {"should_remember": False}
 
 
@@ -669,7 +672,7 @@ Summary:"""
             return response.content[0].text.strip()
 
         except Exception as e:
-            print(f"Preference summarization error: {e}")
+            logger.warning("Preference summarization error: %s", e)
             return "Unable to generate preferences summary."
 
 

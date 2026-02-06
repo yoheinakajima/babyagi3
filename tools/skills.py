@@ -4,7 +4,6 @@ Skills and Composio integration tools.
 This module provides tools for:
 1. Acquiring skills from SKILL.md files (behavioral instructions)
 2. Setting up Composio integrations (external app connections)
-3. Creating workflow tools that combine skills and other tools
 
 Tool Types:
 - "executable": Python code that runs directly (default)
@@ -258,7 +257,7 @@ def _acquire_skill_tool(agent: "Agent", Tool: type) -> "Tool":
         description="""Acquire a skill from a URL or file path containing a SKILL.md file.
 
 Skills are behavioral instructions that guide how to perform tasks.
-They're different from executable tools - skills teach patterns and workflows.
+They're different from executable tools - skills teach patterns and behaviors.
 
 The skill will be scanned for safety before activation:
 - Auto-enabled if safe (score >= 80) and auto_enable=True
@@ -1325,145 +1324,6 @@ def _get_auth_instructions(auth_type: str, app: str, params: list) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# WORKFLOW TOOLS
-# ═══════════════════════════════════════════════════════════════════════════════
-
-
-def _create_workflow_tool(agent: "Agent", Tool: type) -> "Tool":
-    """
-    Create a tool for building workflow tools that combine skills and other tools.
-    """
-
-    def fn(params: dict, ag: "Agent") -> dict:
-        name = params["name"]
-        description = params["description"]
-        depends_on = params.get("depends_on", [])
-        steps = params.get("steps", [])
-
-        if ag.memory is None:
-            return {"error": "Memory system not available"}
-
-        # Verify dependencies exist
-        missing = [d for d in depends_on if d not in ag.tools]
-        if missing:
-            return {
-                "error": f"Missing dependencies: {missing}",
-                "suggestion": "Enable these tools first, then create the workflow.",
-            }
-
-        # Generate workflow code
-        code = _generate_workflow_code(name, description, depends_on, steps)
-
-        # Save as executable tool
-        tool_def = ag.memory.store.save_tool_definition(
-            name=name,
-            description=description,
-            parameters={
-                "type": "object",
-                "properties": {
-                    "input": {
-                        "type": "string",
-                        "description": "Input for the workflow",
-                    }
-                },
-            },
-            source_code=code,
-            tool_type="executable",
-            depends_on=depends_on,
-            category="workflow",
-            is_dynamic=True,
-        )
-
-        return {
-            "success": True,
-            "name": name,
-            "depends_on": depends_on,
-            "message": f"Workflow '{name}' created. Note: Complex workflows may need manual implementation.",
-        }
-
-    return Tool(
-        name="create_workflow",
-        description="""Create a workflow tool that orchestrates other tools and skills.
-
-Workflows combine multiple tools/skills into a single reusable tool.
-This is useful for multi-step processes that you do repeatedly.
-
-Example:
-create_workflow(
-    name="daily_standup",
-    description="Post daily standup to Slack",
-    depends_on=["skill_standup_format", "slack_send_message"],
-    steps=["Activate standup skill", "Format update", "Post to #standup"]
-)""",
-        parameters={
-            "type": "object",
-            "properties": {
-                "name": {
-                    "type": "string",
-                    "description": "Name for the workflow tool",
-                },
-                "description": {
-                    "type": "string",
-                    "description": "What this workflow does",
-                },
-                "depends_on": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "List of tool/skill names this workflow uses",
-                },
-                "steps": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "High-level steps the workflow performs",
-                },
-            },
-            "required": ["name", "description"],
-        },
-        fn=fn,
-    )
-
-
-def _generate_workflow_code(name: str, description: str, depends_on: list, steps: list) -> str:
-    """Generate Python code for a workflow tool."""
-    steps_comment = "\n".join(f"    # {i+1}. {step}" for i, step in enumerate(steps))
-    depends_comment = ", ".join(depends_on) if depends_on else "none"
-
-    return f'''
-def workflow_fn(params: dict, agent) -> dict:
-    """
-    {description}
-
-    Dependencies: {depends_comment}
-    Steps:
-{steps_comment}
-    """
-    input_data = params.get("input", "")
-
-    # TODO: Implement workflow logic
-    # Access dependent tools via agent.tools[tool_name].execute(params, agent)
-
-    return {{
-        "workflow": "{name}",
-        "status": "not_implemented",
-        "message": "This workflow needs manual implementation. Use the steps above as a guide.",
-        "depends_on": {depends_on!r},
-    }}
-
-{name}_tool = Tool(
-    name="{name}",
-    description="""{description}""",
-    parameters={{
-        "type": "object",
-        "properties": {{
-            "input": {{"type": "string", "description": "Input for the workflow"}}
-        }}
-    }},
-    fn=workflow_fn
-)
-'''
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
 # TOOL REGISTRATION
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1473,5 +1333,4 @@ def get_skill_tools(agent: "Agent", Tool: type) -> list["Tool"]:
     return [
         _acquire_skill_tool(agent, Tool),
         _composio_setup_tool(agent, Tool),
-        _create_workflow_tool(agent, Tool),
     ]

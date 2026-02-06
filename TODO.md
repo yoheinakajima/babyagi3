@@ -64,11 +64,6 @@ Items that need to be addressed before public release. Organized by priority.
 
 ## Medium Priority
 
-### Workflow tool is a stub
-- **Location**: `tools/skills.py:1375`
-- **Issue**: `# TODO: Implement workflow logic` — the workflow creation tool is defined but the execution logic is placeholder.
-- **Impact**: Users can "create" workflows but they don't actually do anything.
-
 ### ~~File search semantic integration~~ (Done)
 - **Location**: `tools/files/__init__.py`, `tools/files/index.py`
 - **Resolution**: Added `FileIndex` class with SQLite-backed embedding storage. File save indexes summary embeddings; search combines semantic similarity (0.7 weight) with keyword matching (0.3 weight). Also added `search_facts` to `QuickRetrieval` and `DeepRetrievalAgent` for fact-level semantic search.
@@ -98,9 +93,8 @@ Items that need to be addressed before public release. Organized by priority.
 - **Issue**: Many `pass` statements in exception handlers throughout the codebase. Some are intentional (catching expected failures gracefully), others may be hiding bugs.
 - **Recommendation**: Review each and add a comment explaining why the exception is intentionally swallowed, or add logging.
 
-### Logging infrastructure
-- **Issue**: The codebase uses `print()` and `console.*` for output but has no structured logging (`import logging`). For production use, structured logs (JSON) would be valuable.
-- **Recommendation**: Add `logging.getLogger(__name__)` to key modules with configurable log levels.
+### ~~Logging infrastructure~~ (Done)
+- **Resolution**: All modules now use `logging.getLogger(__name__)` with configurable levels. Error-handling `print()` calls replaced with `logger.warning()`/`logger.error()`. User-facing output standardized on `console.*` methods. Two-tier strategy (Python logging for ops, console for UX) documented in [ARCHITECTURE.md](ARCHITECTURE.md#logging-strategy).
 
 ### Type annotations
 - **Issue**: Some functions lack return type annotations, especially in `tools/` modules.
@@ -123,7 +117,6 @@ Items that need to be addressed before public release. Organized by priority.
 - Would need: per-user threads, per-user memory namespaces, auth on API endpoints.
 
 ### Learning system conflict resolution
-- `docs/DESIGN_SELF_IMPROVEMENT.md` mentions "Learning Conflicts" as a future extension.
 - Contradictory learnings (e.g., "user likes long emails" vs "user likes short emails") aren't detected.
 
 ### Learning decay
@@ -155,6 +148,5 @@ Items that need to be addressed before public release. Organized by priority.
 - [ ] Add `LICENSE` file
 - [x] Add optional dependency group for voice
 - [x] Remove unused `import asyncio` in `tools/research.py`
-- [ ] Implement workflow tool logic
 - [x] Implement file search semantic integration
-- [ ] Add structured logging
+- [x] Add structured logging

@@ -270,7 +270,7 @@ class ExtractionPipeline:
                 result = await self.extract(event)
                 results.append(result)
             except Exception as e:
-                print(f"Retry failed for event {event.id}: {e}")
+                logger.warning("Retry failed for event %s: %s", event.id, e)
 
         return results
 

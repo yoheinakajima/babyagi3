@@ -565,8 +565,7 @@ def get_embedding(text: str) -> list[float]:
     try:
         return get_provider().embed(text)
     except Exception as e:
-        # Log the error (could use proper logging in production)
-        print(f"Embedding generation failed, using fallback: {e}")
+        logger.warning("Embedding generation failed, using fallback: %s", e)
         return get_fallback_provider().embed(text)
 
 
@@ -580,7 +579,7 @@ def get_embeddings(texts: list[str]) -> list[list[float]]:
     try:
         return get_provider().embed_batch(texts)
     except Exception as e:
-        print(f"Batch embedding generation failed, using fallback: {e}")
+        logger.warning("Batch embedding generation failed, using fallback: %s", e)
         return get_fallback_provider().embed_batch(texts)
 
 

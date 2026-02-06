@@ -346,7 +346,6 @@ Each folder has its own README with file-by-file documentation.
 | **[utils/README.md](utils/README.md)** | EventEmitter, console, utilities |
 | **[metrics/README.md](metrics/README.md)** | Cost tracking system |
 | **[docs/README.md](docs/README.md)** | Design documents index |
-| **[docs/DESIGN_SELF_IMPROVEMENT.md](docs/DESIGN_SELF_IMPROVEMENT.md)** | Learning system design |
 
 ---
 
