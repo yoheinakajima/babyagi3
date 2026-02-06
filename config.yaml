@@ -26,7 +26,7 @@ channels:
     api_key: "${AGENTMAIL_API_KEY:}"
     inbox_id: "${AGENTMAIL_INBOX_ID:}"
 
-  # Voice (requires additional packages)
+  # Voice (requires additional packages: pip install babyagi[voice])
   voice:
     enabled: false
     wake_word: "hey assistant"
@@ -35,6 +35,8 @@ channels:
     whisper_model: "base"  # tiny, base, small, medium, large
     sample_rate: 16000
     max_duration: 10  # max recording seconds
+    silence_threshold: 2.0  # seconds of silence to stop recording
+    energy_threshold: 0.01  # RMS energy level for silence detection
 
   # SendBlue - SMS/iMessage via SendBlue API
   # Automatically enabled when SENDBLUE_API_KEY and SENDBLUE_API_SECRET are set

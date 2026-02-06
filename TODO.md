@@ -45,23 +45,13 @@ Items that need to be addressed before public release. Organized by priority.
 - **Issue**: `except Exception:` with `pass` masks errors silently. Open source users will struggle to debug.
 - **Fix**: Replace with specific exception types (`except httpx.HTTPError`, `except json.JSONDecodeError`, etc.) and add `logging.warning()` or `logging.debug()` calls.
 
-### Voice listener platform-specific code
-- **Location**: `listeners/voice.py:265`
-- **Issue**: Uses `afplay` (macOS only) for audio playback. Fails silently on Linux/Windows.
-- **Fix**: Add platform detection:
-  ```python
-  import sys
-  if sys.platform == "darwin":
-      cmd = ["afplay", f.name]
-  elif sys.platform == "linux":
-      cmd = ["paplay", f.name]
-  ```
-  Or use a cross-platform library.
+### ~~Voice listener platform-specific code~~ (Done)
+- **Location**: `listeners/voice.py`
+- **Resolution**: Added `_get_playback_command()` with platform detection: `afplay` (macOS), `paplay`/`aplay`/`ffplay` (Linux), PowerShell `SoundPlayer` (Windows). Falls back with a logged warning if no player is found. Also added temp file cleanup (`os.unlink` in `finally` blocks) for all temp WAV/MP3 files.
 
-### Voice listener silence detection
-- **Location**: `listeners/voice.py:103`
-- **Issue**: `# TODO: Implement silence detection for automatic stop` — currently records for a fixed `max_duration` (10 seconds) regardless of when the user stops speaking.
-- **Impact**: Poor UX — users wait the full duration.
+### ~~Voice listener silence detection~~ (Done)
+- **Location**: `listeners/voice.py`
+- **Resolution**: Implemented energy-based silence detection. Records in 100ms chunks, computes RMS energy per chunk, and stops recording after `silence_threshold` seconds of silence following detected speech. Configurable via `energy_threshold` and `silence_threshold` in `config.yaml`. Also added usage documentation to `listeners/README.md`.
 
 ### .gitignore gaps
 - **Location**: `.gitignore`
@@ -153,7 +143,7 @@ Items that need to be addressed before public release. Organized by priority.
 - [x] Export `run_sendblue_listener` from `listeners/__init__.py`
 - [ ] Add test suite (`tests/`)
 - [x] Replace broad `except Exception` handlers
-- [ ] Fix voice listener platform issues
+- [x] Fix voice listener platform issues
 - [x] Fix .gitignore (add `*.db`, fix typo)
 - [ ] Add `LICENSE` file
 - [x] Add optional dependency group for voice
