@@ -58,6 +58,7 @@ CORE_TOOLS = frozenset([
     "schedule",
     "register_tool",
     "send_message",
+    "join_meeting",
 ])
 
 # Default tools that should always be available alongside core tools.
@@ -65,8 +66,7 @@ CORE_TOOLS = frozenset([
 # and must be included regardless of usage history or query relevance,
 # otherwise the agent won't know it can use them.
 DEFAULT_TOOLS = frozenset([
-    # Meeting tools (Recall.ai)
-    "join_meeting",
+    # Meeting tools (Recall.ai) — join_meeting is in CORE_TOOLS
     "get_meeting_status",
     "leave_meeting",
     "get_meeting_transcript",

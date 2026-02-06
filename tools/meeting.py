@@ -324,7 +324,16 @@ class RecallClient:
                 if response.status_code == 200:
                     return response.json()
                 else:
-                    return {"error": f"API error {response.status_code}"}
+                    # Include response body for debugging
+                    try:
+                        body = response.text[:500]
+                    except Exception:
+                        body = ""
+                    return {
+                        "error": f"API error {response.status_code}",
+                        "status_code": response.status_code,
+                        "detail": body,
+                    }
 
             except Exception as e:
                 return {"error": str(e)}

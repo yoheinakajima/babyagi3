@@ -541,11 +541,36 @@ async def recall_status_webhook(
                     )
                     return
 
-                # Fetch full transcript
-                transcript_data = await client.get_bot_transcript(bot_id)
-                if "error" in transcript_data:
-                    logger.error(f"Failed to fetch transcript for bot {bot_id}: {transcript_data}")
-                    return
+                # Fetch transcript with retry — Recall.ai may still be processing
+                # the recording when 'done' fires, returning 400 temporarily.
+                transcript_data = None
+                max_retries = 3
+                for attempt in range(max_retries):
+                    if attempt > 0:
+                        delay = 5 * (2 ** (attempt - 1))  # 5s, 10s
+                        logger.info(f"Retrying transcript fetch for bot {bot_id} in {delay}s (attempt {attempt + 1}/{max_retries})")
+                        await asyncio.sleep(delay)
+
+                    transcript_data = await client.get_bot_transcript(bot_id)
+                    if "error" not in transcript_data:
+                        break  # Success
+
+                    status_code = transcript_data.get("status_code")
+                    if status_code == 400 and attempt < max_retries - 1:
+                        # 400 likely means transcript not ready yet — retry
+                        continue
+                    elif status_code == 400:
+                        # Final attempt still 400 — likely a short meeting with
+                        # insufficient audio for transcription. Log as warning, not error.
+                        logger.warning(
+                            f"Transcript unavailable for bot {bot_id} after {max_retries} attempts (HTTP 400). "
+                            f"This is expected for very short meetings. Detail: {transcript_data.get('detail', '')}"
+                        )
+                        return
+                    else:
+                        # Non-400 error (e.g. 404, 500) — don't retry
+                        logger.error(f"Failed to fetch transcript for bot {bot_id}: {transcript_data}")
+                        return
 
                 meeting_metadata = {
                     "title": bot_data.get("meeting_metadata", {}).get("title", "Meeting"),
