@@ -32,6 +32,7 @@ Usage:
     response = client.completion(messages=[...], model="gpt-4o")  # Same interface!
 """
 
+import asyncio
 import logging
 import time
 from contextlib import contextmanager
@@ -100,6 +101,39 @@ def track_source(source: str):
 def get_current_source() -> str:
     """Get the current source context."""
     return _current_source
+
+
+def _is_transient_error(exc: Exception) -> bool:
+    """Check if an exception is a transient LLM API error worth retrying.
+
+    Covers 503 Service Unavailable, 429 Rate Limit, and connection-level
+    failures that are likely to resolve on their own.
+    """
+    exc_type = type(exc).__name__
+
+    # litellm wraps HTTP 503 as ServiceUnavailableError
+    if "ServiceUnavailable" in exc_type:
+        return True
+    # litellm wraps HTTP 429 as RateLimitError
+    if "RateLimit" in exc_type:
+        return True
+    # litellm internal timeout
+    if "Timeout" in exc_type:
+        return True
+    # Generic connection errors (connection refused, reset, etc.)
+    if "APIConnectionError" in exc_type or "ConnectionError" in exc_type:
+        return True
+
+    # Fall back to inspecting the string representation for status codes
+    exc_str = str(exc).lower()
+    if "503" in exc_str or "service unavailable" in exc_str:
+        return True
+    if "429" in exc_str or "rate limit" in exc_str:
+        return True
+    if "connection refused" in exc_str or "connection reset" in exc_str:
+        return True
+
+    return False
 
 
 # ═══════════════════════════════════════════════════════════
@@ -1102,8 +1136,22 @@ class _AnthropicStyleMessages:
         if converted_tools:
             call_kwargs["tools"] = converted_tools
 
-        # Make the call
-        response = self._client._litellm.completion(**call_kwargs)
+        # Make the call with retry logic for transient errors (e.g. 503)
+        max_retries = 3
+        for attempt in range(max_retries + 1):
+            try:
+                response = self._client._litellm.completion(**call_kwargs)
+                break
+            except Exception as e:
+                if attempt < max_retries and _is_transient_error(e):
+                    delay = 2 ** (attempt + 1)  # 2s, 4s, 8s
+                    logger.warning(
+                        f"Transient LLM error (attempt {attempt + 1}/{max_retries + 1}), "
+                        f"retrying in {delay}s: {e}"
+                    )
+                    time.sleep(delay)
+                else:
+                    raise
 
         duration_ms = int((time.time() - start_time) * 1000)
 
@@ -1154,8 +1202,22 @@ class _AsyncAnthropicStyleMessages(_AnthropicStyleMessages):
         if converted_tools:
             call_kwargs["tools"] = converted_tools
 
-        # Make the call
-        response = await self._client._litellm.acompletion(**call_kwargs)
+        # Make the call with retry logic for transient errors (e.g. 503)
+        max_retries = 3
+        for attempt in range(max_retries + 1):
+            try:
+                response = await self._client._litellm.acompletion(**call_kwargs)
+                break
+            except Exception as e:
+                if attempt < max_retries and _is_transient_error(e):
+                    delay = 2 ** (attempt + 1)  # 2s, 4s, 8s
+                    logger.warning(
+                        f"Transient LLM error (attempt {attempt + 1}/{max_retries + 1}), "
+                        f"retrying in {delay}s: {e}"
+                    )
+                    await asyncio.sleep(delay)
+                else:
+                    raise
 
         duration_ms = int((time.time() - start_time) * 1000)
 
