@@ -27,7 +27,7 @@ Flow:
     4. LLM guides user, answers questions, collects info naturally
     5. LLM calls complete_initialization tool with structured data
     6. Apply config, set env vars, validate services, write marker
-    7. Schedule daily tasks after agent starts (separate step)
+    7. Schedule recurring tasks after agent starts (daily tasks + email check)
     8. Discard all conversation context
     9. Agent starts seamlessly — no restart needed
 
@@ -176,12 +176,13 @@ def reset_initialization():
 
 
 def schedule_post_init_tasks(agent):
-    """Schedule the two daily tasks after agent is fully initialized.
+    """Schedule recurring tasks after agent is fully initialized.
 
     Called from main.py after the agent is created. Reads saved init state
     and sets up:
       1. Daily stats analysis email (5 min after init, then every 24h)
       2. Daily self-improvement task (1h after init, then every 24h)
+      3. Email inbox check (1 min after init, then every 5 min) — if email is configured
 
     After scheduling, deletes the init state file so this is truly one-time.
     """
@@ -233,6 +234,22 @@ def schedule_post_init_tasks(agent):
     agent.scheduler.add(improvement_task)
     logger.info("Scheduled daily self-improvement (first run in ~1 hour)")
 
+    # --- Task 3: Email Check (every 5 minutes) ---
+    if state.get("agentmail_configured") or os.environ.get("AGENTMAIL_API_KEY"):
+        email_check_anchor = (now + timedelta(minutes=1)).isoformat()
+        email_check_task = ScheduledTask(
+            id=uuid.uuid4().hex[:8],
+            name="Check Email",
+            goal=_EMAIL_CHECK_GOAL,
+            schedule=Schedule(
+                kind="every",
+                every="5m",
+                anchor=email_check_anchor,
+            ),
+        )
+        agent.scheduler.add(email_check_task)
+        logger.info("Scheduled email check every 5 minutes (first run in ~1 minute)")
+
     # Clean up init state file - no longer needed
     try:
         INIT_STATE_FILE.unlink()
@@ -276,6 +293,21 @@ After completing your chosen action, store a note in memory with tag "self_impro
 - Brief rationale
 
 This helps you track what you've done and vary your approach. Keep the log entry under 100 words to prevent context bloat."""
+
+_EMAIL_CHECK_GOAL = """Check the email inbox for any new unread messages and process them.
+
+Steps:
+1. Use the check_email tool (or list_emails) to fetch recent messages from the inbox.
+2. For each unread message:
+   a. Read the full message content.
+   b. Determine if it's from the owner or an external sender.
+   c. If from the owner: process the request and send a reply via email.
+   d. If from an external sender: evaluate the message and decide on the appropriate action (reply, forward to owner, store info in memory, etc.).
+   e. If it's a meeting invite: handle accordingly (schedule bot if possible, notify owner).
+3. Mark processed messages as read to avoid reprocessing.
+4. If there are no new messages, do nothing — no need to report.
+
+Be concise and efficient. Only take action on genuinely new, unread messages."""
 
 
 # =============================================================================
@@ -459,9 +491,10 @@ YOUR BEHAVIOR:
 - NEVER make up or guess API keys, emails, or phone numbers
 
 AFTER INITIALIZATION:
-Two daily tasks will be automatically scheduled:
+These recurring tasks will be automatically scheduled:
 1. Daily Stats Report - detailed usage analytics emailed to the owner
 2. Daily Self-Improvement - the agent independently finds ways to be more helpful
+3. Email Check (every 5 min) - regularly checks the inbox for new messages (if email is configured)
 
 The user can always reconfigure later by editing config.yaml, setting environment variables,
 or re-running setup with: python main.py init"""
@@ -816,6 +849,6 @@ def _print_welcome_banner():
 def _print_completion():
     """Print a brief transition message. Keep it light — the agent is about to greet the user."""
     print(f"""
-{_GREEN}  Setup complete.{_RESET} {_DIM}Two daily tasks scheduled (stats report & self-improvement).
+{_GREEN}  Setup complete.{_RESET} {_DIM}Recurring tasks scheduled (stats report, self-improvement & email check).
   Re-run setup anytime with: python main.py init{_RESET}
 """)
