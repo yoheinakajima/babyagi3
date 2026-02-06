@@ -2,6 +2,8 @@
 
 This document provides a comprehensive visual overview of the BabyAGI codebase architecture using Mermaid diagrams.
 
+> **Related docs**: [README.md](README.md) (setup & usage) | [MODELS.md](MODELS.md) (data models) | [RUNNING.md](RUNNING.md) (running examples)
+
 ## High-Level System Architecture
 
 ```mermaid
@@ -703,3 +705,17 @@ flowchart TB
 6. **Background Processing**: Objectives and scheduled tasks run independently in their own threads/tasks, not blocking the main conversation flow.
 
 7. **Decorator-Based Tools**: The `@tool` decorator provides automatic JSON schema generation, dependency tracking, and registration.
+
+---
+
+## Folder Documentation
+
+Each subsystem has its own detailed README:
+
+- [memory/README.md](memory/README.md) — Memory system internals (event log, knowledge graph, summaries)
+- [tools/README.md](tools/README.md) — Tool framework, @tool decorator, health checks
+- [listeners/README.md](listeners/README.md) — Input channel implementations
+- [senders/README.md](senders/README.md) — Output channel protocol and implementations
+- [utils/README.md](utils/README.md) — EventEmitter, console styling, utilities
+- [metrics/README.md](metrics/README.md) — Cost tracking and LLM instrumentation
+- [docs/README.md](docs/README.md) — Design documents index
