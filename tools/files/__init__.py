@@ -25,6 +25,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 from .storage import FileStorage
+from .index import FileIndex
 from .processor import DocumentProcessor
 from .creators import (
     create_csv,
@@ -38,6 +39,7 @@ from .creators import (
 # Global instances (initialized on first use)
 _storage: FileStorage | None = None
 _processor: DocumentProcessor | None = None
+_index: FileIndex | None = None
 
 
 def _get_storage() -> FileStorage:
@@ -52,6 +54,13 @@ def _get_processor() -> DocumentProcessor:
     if _processor is None:
         _processor = DocumentProcessor()
     return _processor
+
+
+def _get_index() -> FileIndex:
+    global _index
+    if _index is None:
+        _index = FileIndex()
+    return _index
 
 
 @tool(packages=["anthropic"])
@@ -73,7 +82,7 @@ def files(
         save     - Save content or file to storage (extracts facts, auto-organizes)
         read     - Read file content
         list     - List files (optionally in a project)
-        search   - Semantic search across file summaries
+        search   - Semantic search across file summaries and metadata
         move     - Move file to different project
         delete   - Delete a file
         create   - Create a new file (CSV, image, Word doc, PDF)
@@ -208,16 +217,21 @@ def _action_save(
     else:
         file_info = storage.save_file(content.encode("utf-8"), filename, project)
 
+    # Index file for semantic search
+    summary = extraction.get("summary", "")
+    tags = extraction.get("tags", [])
+    _index_file_async(file_info["path"], project, file_info["filename"], summary, tags)
+
     return {
         "success": True,
         "path": file_info["path"],
         "project": project,
         "filename": file_info["filename"],
         "size_bytes": file_info["size_bytes"],
-        "summary": extraction.get("summary", ""),
+        "summary": summary,
         "facts_extracted": len(extraction.get("facts", [])),
         "entities_found": len(extraction.get("entities", [])),
-        "tags": extraction.get("tags", []),
+        "tags": tags,
         "extraction": extraction,  # Full extraction for memory integration
     }
 
@@ -267,13 +281,27 @@ def _action_list(storage: FileStorage, project: str | None) -> dict:
 
 
 def _action_search(storage: FileStorage, query: str | None, options: dict) -> dict:
-    """Search for files (placeholder - needs memory integration)."""
+    """Search for files using semantic similarity and keyword matching."""
     if not query:
         return tool_error("Query is required for search action")
 
-    # For now, simple filename/project matching
-    # TODO: Integrate with fact embeddings for semantic search
-    all_files = storage.list_files()
+    index = _get_index()
+    limit = options.get("limit", 20)
+    project = options.get("project")
+
+    # Semantic + keyword search via the file index
+    results = index.search(query, limit=limit, project=project)
+
+    if results:
+        return {
+            "success": True,
+            "query": query,
+            "count": len(results),
+            "files": results,
+        }
+
+    # Fallback: if index is empty (no files indexed yet), do basic keyword search
+    all_files = storage.list_files(project)
     query_lower = query.lower()
 
     matches = []
@@ -287,7 +315,6 @@ def _action_search(storage: FileStorage, query: str | None, options: dict) -> di
         "query": query,
         "count": len(matches),
         "files": matches,
-        "note": "Semantic search will be available when integrated with memory system",
     }
 
 
@@ -305,6 +332,16 @@ def _action_move(
 
     file_info = storage.move_file(path, project, new_filename)
 
+    # Update the search index
+    try:
+        _get_index().update_path(
+            path, file_info["path"],
+            new_project=project,
+            new_filename=file_info["filename"],
+        )
+    except Exception as e:
+        logger.debug("Failed to update file index after move: %s", e)
+
     return {
         "success": True,
         "new_path": file_info["path"],
@@ -319,6 +356,13 @@ def _action_delete(storage: FileStorage, path: str | None) -> dict:
         return tool_error("Path is required for delete action")
 
     deleted = storage.delete_file(path)
+
+    # Remove from search index
+    if deleted:
+        try:
+            _get_index().remove(path)
+        except Exception as e:
+            logger.debug("Failed to remove file from index: %s", e)
 
     return {
         "success": deleted,
@@ -466,3 +510,38 @@ def _guess_mime_type(filename: str) -> str:
     import mimetypes
     mime_type, _ = mimetypes.guess_type(filename)
     return mime_type or "application/octet-stream"
+
+
+def _index_file_async(
+    path: str,
+    project: str,
+    filename: str,
+    summary: str,
+    tags: list[str],
+):
+    """
+    Index a file for semantic search.
+
+    Generates an embedding for the summary text and stores it in the
+    file index. Embedding generation is best-effort; if it fails, the
+    file is still indexed with metadata for keyword search.
+    """
+    embedding = None
+    if summary:
+        try:
+            from memory.embeddings import get_embedding
+            embedding = get_embedding(summary)
+        except Exception as e:
+            logger.debug("Could not generate embedding for file summary: %s", e)
+
+    try:
+        _get_index().index_file(
+            path=path,
+            project=project,
+            filename=filename,
+            summary=summary,
+            tags=tags,
+            embedding=embedding,
+        )
+    except Exception as e:
+        logger.debug("Failed to index file: %s", e)

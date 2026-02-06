@@ -31,6 +31,7 @@ from .models import (
     Event,
     Entity,
     Edge,
+    Fact,
     Topic,
     Task,
     SummaryNode,
@@ -59,6 +60,7 @@ __all__ = [
     "Event",
     "Entity",
     "Edge",
+    "Fact",
     "Topic",
     "Task",
     "SummaryNode",
@@ -192,6 +194,10 @@ class Memory:
     def search_tasks(self, query: str, status: str = None, limit: int = 10) -> list[Task]:
         """Semantic search over tasks."""
         return self.retrieval.search_tasks(query, status, limit)
+
+    def search_facts(self, query: str, fact_type: str = None, source_type: str = None, limit: int = 10) -> list[Fact]:
+        """Semantic search over facts."""
+        return self.retrieval.search_facts(query, fact_type, source_type, limit)
 
     # ═══════════════════════════════════════════════════════════
     # GRAPH NAVIGATION

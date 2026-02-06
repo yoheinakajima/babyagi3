@@ -10,7 +10,7 @@ from typing import Any
 
 from metrics import LiteLLMAnthropicAdapter, track_source, get_model_for_use_case
 from .embeddings import cosine_similarity, get_embedding
-from .models import Edge, Entity, Event, SummaryNode, Task, Topic
+from .models import Edge, Entity, Event, Fact, SummaryNode, Task, Topic
 
 
 class QuickRetrieval:
@@ -275,6 +275,55 @@ class QuickRetrieval:
 
         scored.sort(key=lambda x: x[1], reverse=True)
         return [n for n, _ in scored[:limit]]
+
+    def search_facts(
+        self, query: str, fact_type: str | None = None, source_type: str | None = None, limit: int = 10
+    ) -> list[Fact]:
+        """
+        Find facts semantically similar to query.
+
+        Example: search_facts("revenue figures for Q4")
+        Example: search_facts("investment relationships", fact_type="relation")
+        Example: search_facts("company metrics", source_type="document")
+        """
+        query_embedding = get_embedding(query)
+
+        # Get facts with embeddings
+        cur = self.store.conn.cursor()
+        conditions = ["is_current = 1", "fact_embedding IS NOT NULL"]
+        params = []
+
+        if fact_type:
+            conditions.append("fact_type = ?")
+            params.append(fact_type)
+        if source_type:
+            conditions.append("source_type = ?")
+            params.append(source_type)
+
+        where_clause = " AND ".join(conditions)
+        cur.execute(
+            f"SELECT * FROM facts WHERE {where_clause} LIMIT 500",
+            params,
+        )
+        facts = [self.store._row_to_fact(row) for row in cur.fetchall()]
+
+        if not facts:
+            # Fall back to text search on fact_text
+            cur.execute(
+                "SELECT * FROM facts WHERE is_current = 1 LIMIT 500"
+            )
+            all_facts = [self.store._row_to_fact(row) for row in cur.fetchall()]
+            query_lower = query.lower()
+            return [f for f in all_facts if query_lower in f.fact_text.lower()][:limit]
+
+        # Calculate similarities and sort
+        scored = []
+        for fact in facts:
+            sim = cosine_similarity(query_embedding, fact.fact_embedding)
+            scored.append((fact, sim))
+
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return [f for f, _ in scored[:limit]]
 
     # ═══════════════════════════════════════════════════════════
     # NAVIGATION
@@ -551,6 +600,20 @@ class DeepRetrievalAgent:
                     "required": ["query"],
                 },
             },
+            {
+                "name": "search_facts",
+                "description": "Find facts semantically similar to a query. Can filter by fact_type (relation, attribute, event, state, metric) or source_type (conversation, document, tool, observation).",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "fact_type": {"type": "string"},
+                        "source_type": {"type": "string"},
+                        "limit": {"type": "integer", "default": 10},
+                    },
+                    "required": ["query"],
+                },
+            },
             # Graph
             {
                 "name": "get_entity",
@@ -694,6 +757,26 @@ class DeepRetrievalAgent:
             return [
                 {"id": t.id, "label": t.label, "keywords": t.keywords}
                 for t in topics
+            ]
+
+        elif name == "search_facts":
+            facts = self.retrieval.search_facts(
+                input["query"],
+                input.get("fact_type"),
+                input.get("source_type"),
+                input.get("limit", 10),
+            )
+            return [
+                {
+                    "id": f.id,
+                    "fact_text": f.fact_text,
+                    "fact_type": f.fact_type,
+                    "subject": f.subject_entity_id,
+                    "predicate": f.predicate,
+                    "source_type": f.source_type,
+                    "confidence": f.confidence,
+                }
+                for f in facts
             ]
 
         elif name == "get_entity":
