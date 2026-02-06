@@ -156,8 +156,8 @@ Items that need to be addressed before public release. Organized by priority.
 
 ## Checklist
 
-- [ ] Wire `tools/files` into `tools/__init__.py`
-- [ ] Export `run_sendblue_listener` from `listeners/__init__.py`
+- [x] Wire `tools/files` into `tools/__init__.py`
+- [x] Export `run_sendblue_listener` from `listeners/__init__.py`
 - [ ] Add test suite (`tests/`)
 - [ ] Replace broad `except Exception` handlers
 - [ ] Fix voice listener platform issues
