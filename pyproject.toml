@@ -31,6 +31,9 @@ dependencies = [
 [project.optional-dependencies]
 voice = ["sounddevice", "numpy", "openai-whisper", "pyttsx3", "scipy"]
 
+[dependency-groups]
+dev = ["pytest>=7.0", "pytest-asyncio>=0.23"]
+
 [project.scripts]
 agent = "agent:main"
 server = "server:app"

@@ -15,8 +15,11 @@ class TestRunTests:
     """Test the run_tests tool function."""
 
     def test_run_all_tests_returns_structured_result(self):
-        """Running with no args should return pass/fail counts."""
-        result = run_tests._tool_info["fn"]({"path": "", "keyword": "", "max_failures": 0}, agent=None)
+        """Running tests should return pass/fail counts."""
+        # Target a single small file to avoid recursive test execution and
+        # timeout in CI (running the full suite spawns a nested pytest that
+        # includes this file, causing a >120s timeout).
+        result = run_tests._tool_info["fn"]({"path": "tests/test_utils.py", "keyword": "", "max_failures": 0}, agent=None)
         assert "success" in result
         assert "passed" in result
         assert "failed" in result
