@@ -367,10 +367,10 @@ class ToolContextBuilder:
                 by_category[category] = []
             by_category[category].append((name, first_sentence, usage))
 
-        # Sort categories: core first, then by tool count
+        # Sort categories: core first, then default, then by tool count
         sorted_categories = sorted(
             by_category.keys(),
-            key=lambda c: (0 if c == "core" else 1, -len(by_category[c])),
+            key=lambda c: (0 if c == "core" else 1 if c == "default" else 2, -len(by_category[c])),
         )
 
         # Build summary
