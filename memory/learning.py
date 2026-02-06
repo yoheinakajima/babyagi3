@@ -3,14 +3,14 @@ Self-improvement system for the memory system.
 
 Extracts learnings from feedback, self-evaluation, and tool error patterns.
 Retrieves relevant learnings with age-based decay weighting.
-Resolves contradictions when new learnings supersede old ones.
-Prunes stale learnings after preference summarization.
+Resolves contradictions by superseding (never deleting) old learnings.
+Re-boosts decay when a learning is surfaced and proves useful.
 """
 
 import json
 import logging
 import math
-from datetime import datetime, timedelta
+from datetime import datetime
 from uuid import uuid4
 
 logger = logging.getLogger(__name__)
@@ -25,33 +25,29 @@ def generate_id() -> str:
     return str(uuid4())
 
 
-# Half-life in days for learning decay. A learning's weight drops to 50%
-# after this many days, ~25% after 2x, etc.  Keeps recent corrections
-# prominent while old ones gracefully fade.
+# Half-life in days for learning decay.  A learning's weight drops to 50%
+# after this many days — unless it gets re-boosted by being surfaced in
+# context, which resets updated_at and the decay clock.
 DECAY_HALF_LIFE_DAYS = 14
 
 # Similarity threshold for contradiction detection.  Two learnings about
 # the same tool/topic with cosine similarity above this are considered
-# the same topic — if the newer one has opposite sentiment, the old one
-# gets superseded (deleted).
+# the same topic — the old one gets superseded (kept, but filtered from
+# retrieval).
 CONTRADICTION_SIMILARITY_THRESHOLD = 0.82
-
-# Maximum learnings to keep.  After preference summarization consolidates
-# the knowledge, learnings older than MAX_LEARNING_AGE_DAYS are pruned.
-MAX_LEARNING_AGE_DAYS = 60
-MAX_LEARNINGS_COUNT = 200
 
 
 def decay_weight(learning: Learning, now: datetime | None = None) -> float:
     """Calculate age-based decay weight for a learning (0-1).
 
-    Uses exponential decay with a configurable half-life so recent
-    learnings dominate retrieval while old ones fade gracefully.
+    Uses updated_at (not created_at) so that learnings which are
+    re-boosted by being surfaced in context stay fresh.
     """
     now = now or datetime.now()
-    if not learning.created_at:
+    anchor = learning.updated_at or learning.created_at
+    if not anchor:
         return 0.5
-    age_days = max((now - learning.created_at).total_seconds() / 86400, 0)
+    age_days = max((now - anchor).total_seconds() / 86400, 0)
     return math.exp(-0.693 * age_days / DECAY_HALF_LIFE_DAYS)  # ln(2) ≈ 0.693
 
 
@@ -61,18 +57,20 @@ def decay_weight(learning: Learning, now: datetime | None = None) -> float:
 
 
 def resolve_contradictions(new_learning: Learning, store) -> list[str]:
-    """Find and delete learnings that the new one supersedes.
+    """Mark existing learnings that the new one supersedes.
 
     Two learnings contradict when they are about the same topic
     (high embedding similarity + same tool_id) but express opposite
-    sentiment.  The newer learning wins.
+    sentiment.  The old one is *not* deleted — it stays in the DB
+    with superseded_by pointing to the new one, preserving history
+    for flip-flop tracking.
 
     Returns list of superseded learning IDs.
     """
     if not new_learning.content_embedding:
         return []
 
-    # Search for similar existing learnings
+    # Search for similar existing learnings (already excludes superseded)
     similar = store.search_learnings(
         new_learning.content_embedding,
         tool_id=new_learning.tool_id,
@@ -101,7 +99,7 @@ def resolve_contradictions(new_learning: Learning, store) -> list[str]:
         )
 
         if same_scope and opposite_sentiment:
-            store.delete_learning(existing.id)
+            store.supersede_learning(existing.id, new_learning.id)
             superseded.append(existing.id)
             logger.debug(
                 "Superseded learning %s (sim=%.2f, %s→%s)",
@@ -509,23 +507,22 @@ Return only valid JSON, no other text."""
 
 
 # ═══════════════════════════════════════════════════════════
-# TOOL ERROR ANALYSIS
+# TOOL ERROR ANALYSIS → AUTO-FIX TASKS
 # ═══════════════════════════════════════════════════════════
 
 
 class ToolErrorAnalyzer:
-    """Converts tool error statistics into learnings.
+    """Converts tool error statistics into learnings and fix tasks.
 
-    Runs periodically to check for tools with poor success rates or
-    high error counts and creates learnings so the agent can adapt
-    its behavior (e.g., validate parameters, prefer alternative tools).
+    When a tool is unhealthy, creates both:
+    - A learning (so the agent knows about the problem in context)
+    - A fix task (so the agent proactively works on repairing it)
     """
 
-    def generate_learnings(self, store) -> list[Learning]:
-        """Create learnings from unhealthy/problematic tool stats.
+    def analyze_and_fix(self, store) -> list[Learning]:
+        """Create learnings + fix tasks from unhealthy/problematic tool stats.
 
-        Skips tools that already have a recent tool_error_pattern learning
-        to avoid duplicating the same signal.
+        Returns the learnings created (tasks are created as a side-effect).
         """
         try:
             unhealthy = store.get_unhealthy_tools()
@@ -544,8 +541,10 @@ class ToolErrorAnalyzer:
 
         learnings = []
         for tool in tools:
-            # Skip if we already have a recent learning about this tool
-            existing = store.find_learnings(tool_id=tool.name, limit=1)
+            # Skip if we already have a recent active learning about this tool
+            existing = store.find_learnings(
+                tool_id=tool.name, source_type="tool_error_pattern", limit=1
+            )
             if existing:
                 age_days = (datetime.now() - existing[0].created_at).total_seconds() / 86400
                 if age_days < 7:
@@ -555,13 +554,13 @@ class ToolErrorAnalyzer:
                 f"Tool '{tool.name}' has a {tool.success_rate:.0f}% success rate "
                 f"({tool.error_count} errors out of {tool.usage_count} uses)."
             )
-            recommendation = None
             if tool.last_error:
                 content += f" Last error: {tool.last_error[:200]}"
-                recommendation = (
-                    f"Be cautious with '{tool.name}'. "
-                    f"Validate parameters before use or consider alternatives."
-                )
+
+            recommendation = (
+                f"Investigate and fix '{tool.name}'. "
+                f"Check parameters, dependencies, and error patterns."
+            )
 
             learning = Learning(
                 id=generate_id(),
@@ -577,11 +576,36 @@ class ToolErrorAnalyzer:
             )
             learnings.append(learning)
 
+            # Create a fix task so the agent acts on it
+            try:
+                task_title = f"Fix tool '{tool.name}' ({tool.success_rate:.0f}% success rate)"
+                task_desc = (
+                    f"Tool '{tool.name}' is failing frequently.\n"
+                    f"Success rate: {tool.success_rate:.0f}% "
+                    f"({tool.error_count} errors / {tool.usage_count} uses)\n"
+                )
+                if tool.last_error:
+                    task_desc += f"Last error: {tool.last_error[:500]}\n"
+                task_desc += (
+                    "\nInvestigate the error pattern and fix the root cause. "
+                    "Check parameter validation, API changes, or dependency issues."
+                )
+
+                store.create_task(
+                    title=task_title,
+                    description=task_desc,
+                    type_raw="tool_fix",
+                    type_cluster="maintenance",
+                )
+                logger.debug("Created fix task for tool '%s'", tool.name)
+            except Exception as e:
+                logger.debug("Could not create fix task for '%s': %s", tool.name, e)
+
         return learnings
 
 
 # ═══════════════════════════════════════════════════════════
-# LEARNING RETRIEVAL (with decay weighting)
+# LEARNING RETRIEVAL (with decay + re-boost)
 # ═══════════════════════════════════════════════════════════
 
 
@@ -589,7 +613,9 @@ class LearningRetriever:
     """Retrieves relevant learnings for context assembly.
 
     All retrieval methods weight results by age-based decay so that
-    recent learnings dominate while old ones fade.
+    recent learnings dominate while old ones fade.  When a learning
+    is surfaced, its updated_at is touched to re-boost its decay
+    weight — frequently useful learnings stay alive indefinitely.
     """
 
     def __init__(self, store):
@@ -598,13 +624,17 @@ class LearningRetriever:
     def get_for_tool(self, tool_name: str, limit: int = 3) -> list[Learning]:
         """Get learnings specific to a tool, weighted by decay."""
         learnings = self.store.get_learnings_for_tool(tool_name, limit=limit * 2)
-        return self._rank_by_decay(learnings)[:limit]
+        ranked = self._rank_by_decay(learnings)[:limit]
+        self._touch_all(ranked)
+        return ranked
 
     def get_for_objective(self, goal: str, limit: int = 5) -> list[Learning]:
         """Get learnings relevant to an objective via vector search + decay."""
         embedding = get_embedding(goal)
         learnings = self.store.search_learnings(embedding=embedding, limit=limit * 2)
-        return self._rank_by_decay(learnings)[:limit]
+        ranked = self._rank_by_decay(learnings)[:limit]
+        self._touch_all(ranked)
+        return ranked
 
     def get_for_objective_type(
         self, objective_type: str, limit: int = 3
@@ -614,7 +644,9 @@ class LearningRetriever:
             objective_type=objective_type,
             limit=limit * 2,
         )
-        return self._rank_by_decay(learnings)[:limit]
+        ranked = self._rank_by_decay(learnings)[:limit]
+        self._touch_all(ranked)
+        return ranked
 
     def get_user_preferences(self) -> str:
         """Get summarized user preferences."""
@@ -652,14 +684,22 @@ class LearningRetriever:
         scored.sort(key=lambda x: x[0], reverse=True)
         return [l for _, l in scored]
 
+    def _touch_all(self, learnings: list[Learning]):
+        """Re-boost decay for learnings that were just surfaced."""
+        for l in learnings:
+            try:
+                self.store.touch_learning(l.id)
+            except Exception:
+                pass  # Non-critical — don't break retrieval
+
 
 # ═══════════════════════════════════════════════════════════
-# PREFERENCE SUMMARIZATION (with pruning)
+# PREFERENCE SUMMARIZATION
 # ═══════════════════════════════════════════════════════════
 
 
 class PreferenceSummarizer:
-    """Summarizes learnings into user preferences and prunes stale ones."""
+    """Summarizes active learnings into a user preferences snapshot."""
 
     def __init__(self):
         self._client = None
@@ -678,28 +718,20 @@ class PreferenceSummarizer:
 
     async def refresh_preferences(self, store) -> str:
         """
-        Regenerate the user preferences summary from all learnings,
-        then prune stale ones that have been consolidated.
+        Regenerate the user preferences summary from active learnings.
+
+        No learnings are deleted — decay and supersession handle relevance.
 
         Returns:
             New preferences summary text
         """
-        # Get all learnings, prioritize recent
         learnings = store.get_all_learnings(limit=50)
 
         if not learnings:
             return "No user preferences recorded yet."
 
-        # Format for prompt
         learnings_text = self._format_learnings(learnings)
-
-        # Generate summary
-        summary = await self._llm_summarize(learnings_text)
-
-        # Prune stale learnings now that knowledge is consolidated
-        self._prune_stale(store)
-
-        return summary
+        return await self._llm_summarize(learnings_text)
 
     def _format_learnings(self, learnings: list[Learning]) -> str:
         """Format learnings for the summary prompt."""
@@ -718,44 +750,6 @@ class PreferenceSummarizer:
             items.append(line)
 
         return "\n".join(items)
-
-    def _prune_stale(self, store):
-        """Delete learnings that are old and have been consolidated.
-
-        Keeps learnings under MAX_LEARNINGS_COUNT and removes anything
-        older than MAX_LEARNING_AGE_DAYS.
-        """
-        try:
-            all_learnings = store.get_all_learnings(limit=MAX_LEARNINGS_COUNT + 100)
-
-            if len(all_learnings) <= MAX_LEARNINGS_COUNT:
-                # Only prune by age
-                cutoff = datetime.now() - timedelta(days=MAX_LEARNING_AGE_DAYS)
-                for l in all_learnings:
-                    if l.created_at and l.created_at < cutoff:
-                        store.delete_learning(l.id)
-                return
-
-            # Over the cap — keep the top MAX_LEARNINGS_COUNT by score,
-            # delete the rest
-            now = datetime.now()
-            scored = [
-                (l.confidence * decay_weight(l, now), l)
-                for l in all_learnings
-            ]
-            scored.sort(key=lambda x: x[0], reverse=True)
-
-            to_keep = {l.id for _, l in scored[:MAX_LEARNINGS_COUNT]}
-            for l in all_learnings:
-                if l.id not in to_keep:
-                    store.delete_learning(l.id)
-
-            pruned = len(all_learnings) - len(to_keep)
-            if pruned > 0:
-                logger.info("Pruned %d stale learnings", pruned)
-
-        except Exception as e:
-            logger.warning("Learning pruning error: %s", e)
 
     async def _llm_summarize(self, learnings_text: str) -> str:
         """Call LLM to generate preferences summary."""

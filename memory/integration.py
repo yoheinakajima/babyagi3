@@ -927,10 +927,10 @@ def create_extraction_background_task(
                         # Brief yield between batches to let other tasks run
                         await asyncio.sleep(1)
 
-                # Convert tool error stats into learnings
+                # Convert tool error stats into learnings + fix tasks
                 try:
                     analyzer = ToolErrorAnalyzer()
-                    error_learnings = analyzer.generate_learnings(memory.store)
+                    error_learnings = analyzer.analyze_and_fix(memory.store)
                     for learning in error_learnings:
                         memory.store.create_learning(learning)
                         resolve_contradictions(learning, memory.store)

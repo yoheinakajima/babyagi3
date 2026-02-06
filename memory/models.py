@@ -490,7 +490,12 @@ class Learning:
     # Actionable insight
     recommendation: str | None = None  # What to do differently
 
-    # Timestamps
+    # Contradiction tracking — superseded learnings stay in DB for history
+    # but are excluded from retrieval by default
+    superseded_by: str | None = None  # ID of the learning that replaced this one
+
+    # Timestamps — updated_at is refreshed when a learning is surfaced
+    # in context (re-boosts decay weight so useful learnings stay alive)
     created_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)
 
