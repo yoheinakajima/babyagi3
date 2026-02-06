@@ -20,6 +20,8 @@ python main.py
 
 That's it. You now have a persistent AI agent with memory, scheduling, background tasks, and web search.
 
+Verbose mode is on by default — you'll see tool calls, webhook activity, and background operations as they happen. To turn it off, just tell the agent "turn off verbose" or type `/verbose off`.
+
 ## What You Can Ask For
 
 Everything below is done through natural conversation. The agent decides which tools to use.
@@ -189,7 +191,7 @@ memory:
   background_extraction: true
   extraction_interval: 60
 
-verbose: off  # off, light, deep
+verbose: light  # off, light (default), deep
 ```
 
 ### Environment Variables
@@ -208,7 +210,7 @@ verbose: off  # off, light, deep
 | `E2B_API_KEY` | For sandboxing | Code execution sandbox |
 | `COMPOSIO_API_KEY` | For integrations | 250+ app integrations |
 | `AGENT_NAME` | Optional | Agent display name |
-| `BABYAGI_VERBOSE` | Optional | `off`, `light`, `deep` |
+| `BABYAGI_VERBOSE` | Optional | `off`, `light` (default), `deep` |
 
 ---
 

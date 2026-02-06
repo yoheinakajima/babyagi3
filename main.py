@@ -23,8 +23,8 @@ Configuration:
 
 Verbose Output:
     Control with BABYAGI_VERBOSE environment variable or config.yaml:
-    - 0/off: No verbose output (default)
-    - 1/light: Key operations (tool names, task starts)
+    - 0/off: No verbose output
+    - 1/light: Key operations (tool names, task starts) [default]
     - 2/deep: Everything (inputs, outputs, full details)
 
     Runtime toggle: /verbose [off|light|deep]
@@ -46,6 +46,13 @@ logging.root.addHandler(handler)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("primp").setLevel(logging.WARNING)
 
+# Suppress uvicorn loggers - these pollute the CLI chat interface
+# with raw HTTP access logs (e.g. "INFO: 172.31.95.130 - POST /webhooks/...")
+# and startup messages. We replace them with styled console.activity() output.
+logging.getLogger("uvicorn").setLevel(logging.WARNING)
+logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+logging.getLogger("uvicorn.error").setLevel(logging.WARNING)
+
 # Default to WARNING - will be adjusted based on verbose level
 logging.root.setLevel(logging.WARNING)
 handler.setLevel(logging.WARNING)
@@ -55,9 +62,12 @@ logger = logging.getLogger(__name__)
 
 def configure_logging_for_verbose(verbose_level: str):
     """Configure Python logging level based on verbose setting.
-    
+
     - off/light: Only show WARNING and above (suppress INFO)
     - deep: Show INFO and above (full logging)
+
+    Note: uvicorn loggers are always kept at WARNING to prevent
+    raw HTTP access logs from polluting the CLI chat interface.
     """
     if verbose_level == "deep" or verbose_level == "2":
         logging.root.setLevel(logging.INFO)
@@ -66,6 +76,12 @@ def configure_logging_for_verbose(verbose_level: str):
         # off or light - suppress INFO level logs
         logging.root.setLevel(logging.WARNING)
         handler.setLevel(logging.WARNING)
+
+    # Always keep uvicorn quiet - its access logs break the CLI flow.
+    # Webhook activity is shown via console.activity() instead.
+    logging.getLogger("uvicorn").setLevel(logging.WARNING)
+    logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+    logging.getLogger("uvicorn.error").setLevel(logging.WARNING)
 
 
 def check_llm_provider():
@@ -141,7 +157,7 @@ async def run_cli_only():
 
     # Configure verbose level from config (env var takes precedence)
     if not os.environ.get("BABYAGI_VERBOSE"):
-        verbose_config = config.get("verbose", "off")
+        verbose_config = config.get("verbose", "light")
         console.set_verbose(verbose_config)
         configure_logging_for_verbose(verbose_config)
 
@@ -187,7 +203,7 @@ async def run_all_channels():
 
     # Configure verbose level from config (env var takes precedence)
     if not os.environ.get("BABYAGI_VERBOSE"):
-        verbose_config = config.get("verbose", "off")
+        verbose_config = config.get("verbose", "light")
         console.set_verbose(verbose_config)
         configure_logging_for_verbose(verbose_config)
 
@@ -294,7 +310,7 @@ async def run_all_with_server(port: int = 5000):
 
     # Configure verbose level from config (env var takes precedence)
     if not os.environ.get("BABYAGI_VERBOSE"):
-        verbose_config = config.get("verbose", "off")
+        verbose_config = config.get("verbose", "light")
         console.set_verbose(verbose_config)
         configure_logging_for_verbose(verbose_config)
 
@@ -352,12 +368,12 @@ async def run_all_with_server(port: int = 5000):
         else:
             logger.warning("SendBlue enabled but API keys not set")
 
-    # Create uvicorn server config
+    # Create uvicorn server config (warning level to suppress access logs)
     uvicorn_config = uvicorn.Config(
         app,
         host="0.0.0.0",
         port=port,
-        log_level="info"
+        log_level="warning"
     )
     server = uvicorn.Server(uvicorn_config)
 

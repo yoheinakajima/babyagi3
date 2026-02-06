@@ -21,6 +21,7 @@ from fastapi import FastAPI, BackgroundTasks, Request, Header, HTTPException, We
 from pydantic import BaseModel
 
 from agent import Agent, Objective
+from utils.console import console
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +46,7 @@ def _register_server_senders():
                 "from_number": os.environ.get("SENDBLUE_PHONE_NUMBER"),
             }
             agent.register_sender("sendblue", SendBlueSender(sendblue_config))
-            logger.info("SendBlue sender registered for webhooks")
+            logger.debug("SendBlue sender registered for webhooks")
         except Exception as e:
             logger.error(f"Failed to register SendBlue sender: {e}")
 
@@ -56,7 +57,7 @@ async def lifespan(app: FastAPI):
     global scheduler_task
     _register_server_senders()
     scheduler_task = asyncio.create_task(agent.run_scheduler())
-    logger.info("Server started with SendBlue webhook at /webhooks/sendblue")
+    logger.debug("Server started with SendBlue webhook at /webhooks/sendblue")
     yield
     if scheduler_task:
         scheduler_task.cancel()
@@ -272,7 +273,7 @@ async def sendblue_webhook(
     global _sendblue_processed_ids
 
     # Log the incoming webhook
-    logger.info(f"SendBlue webhook received: from={payload.from_number}, content_preview={payload.content[:50] if payload.content else 'empty'}...")
+    console.activity("sendblue", f"inbound from {payload.from_number}")
 
     # Get message ID for deduplication
     msg_id = payload.message_handle or f"{payload.from_number}:{payload.date_sent}"
@@ -331,7 +332,7 @@ async def sendblue_webhook(
     if payload.media_url:
         message_input += f"\n\n[Media attached: {payload.media_url}]"
 
-    logger.info(f"Processing SendBlue message from {payload.from_number} (owner={is_owner})")
+    logger.debug(f"Processing SendBlue message from {payload.from_number} (owner={is_owner})")
 
     # Process in background to return 200 quickly (SendBlue requires fast response)
     async def process_and_reply():
@@ -349,7 +350,7 @@ async def sendblue_webhook(
                         to=payload.from_number,
                         content=response_text
                     )
-                    logger.info(f"Replied to {payload.from_number}")
+                    console.activity("sendblue", f"replied to {payload.from_number}")
                 else:
                     logger.warning("SendBlue sender not registered, cannot auto-reply")
 
@@ -374,7 +375,7 @@ async def recall_realtime_websocket(websocket: WebSocket):
     as JSON messages during the meeting.
     """
     await websocket.accept()
-    logger.info("Recall.ai realtime WebSocket connected")
+    console.activity("recall", "realtime WebSocket connected")
 
     try:
         while True:
@@ -399,7 +400,7 @@ async def recall_realtime_websocket(websocket: WebSocket):
                 text = " ".join(w.get("text", "") for w in words)
 
                 if bot_id and text:
-                    logger.info(f"Recall realtime [{event_type}] bot={bot_id}: {speaker}: {text[:100]}")
+                    logger.debug(f"Recall realtime [{event_type}] bot={bot_id}: {speaker}: {text[:100]}")
                     try:
                         from tools.meeting import get_meeting_processor
                         processor = get_meeting_processor()
@@ -416,7 +417,7 @@ async def recall_realtime_websocket(websocket: WebSocket):
                 logger.debug(f"Recall realtime WS event: {event_type}")
 
     except WebSocketDisconnect:
-        logger.info("Recall.ai realtime WebSocket disconnected")
+        console.activity("recall", "realtime WebSocket disconnected")
     except Exception as e:
         logger.error(f"Recall realtime WebSocket error: {e}")
 
@@ -480,7 +481,8 @@ async def recall_status_webhook(
     bot_id = data.get("bot_id")
     status = data.get("status", {}).get("code")
 
-    logger.info(f"Recall bot status change: bot={bot_id}, status={status}, event={event_type}")
+    bot_short = (bot_id[:8] + "…") if bot_id else "unknown"
+    console.activity("recall", f"bot {bot_short} → {status or 'unknown'}")
 
     # Handle meeting end - trigger post-meeting processing
     if status in ("call_ended", "done", "analysis_done"):
@@ -528,7 +530,7 @@ async def recall_status_webhook(
                     except Exception as e:
                         logger.error(f"Failed to send meeting notification: {e}")
 
-                logger.info(f"Processed completed meeting {bot_id}: {meeting_metadata.get('title')}")
+                console.activity("recall", f"meeting processed: {meeting_metadata.get('title', 'Meeting')}")
 
             except Exception as e:
                 logger.error(f"Error processing meeting end for bot {bot_id}: {e}")
@@ -556,7 +558,7 @@ async def recall_general_webhook(
         return {"status": "error", "message": "Invalid JSON"}
 
     event_type = payload.get("event", "")
-    logger.info(f"Recall webhook received: event={event_type}")
+    console.activity("recall", f"webhook: {event_type}")
 
     # Route to appropriate handler
     if event_type == "bot.status_change":
@@ -568,7 +570,8 @@ async def recall_general_webhook(
         # Transcript done is similar to bot status done
         data = payload.get("data", {})
         bot_id = data.get("bot_id")
-        logger.info(f"Transcript done for bot {bot_id}")
+        bot_short = (bot_id[:8] + "…") if bot_id else "unknown"
+        console.activity("recall", f"transcript done for bot {bot_short}")
         # The status webhook will handle the actual processing when bot status changes to done
 
     return {"status": "ok", "event": event_type}

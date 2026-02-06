@@ -63,6 +63,13 @@ async def run_cli_listener(agent, config: dict = None, start_scheduler: bool = F
     # Set up event handlers for verbose output
     setup_event_handlers(agent)
 
+    # Show verbose mode hint
+    from utils.console import VerboseLevel
+    level = console.get_verbose()
+    if level >= VerboseLevel.LIGHT:
+        level_name = "light" if level == VerboseLevel.LIGHT else "deep"
+        console.system(f'Verbose mode: {level_name} (say "turn off verbose" to hide logs)')
+
     # Get tool health and generate AI greeting
     try:
         from tools import get_health_summary
