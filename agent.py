@@ -1216,13 +1216,17 @@ Work autonomously. When done, provide a summary of what was accomplished and how
         """Build owner info for the system prompt from config.
 
         Only includes fields that are actually set. This gives the agent
-        basic knowledge about its owner (contact info, timezone) that
-        comes from the owner's explicit configuration.
+        basic knowledge about its owner (who they are, how they want help,
+        contact info, timezone) from the owner's explicit configuration.
         """
         owner_config = self.config.get("owner", {})
         lines = []
         if owner_config.get("name"):
             lines.append(f"- Name: {owner_config['name']}")
+        if owner_config.get("bio"):
+            lines.append(f"- About: {owner_config['bio']}")
+        if owner_config.get("goal"):
+            lines.append(f"- How they want you to help: {owner_config['goal']}")
         if owner_config.get("email"):
             lines.append(f"- Email: {owner_config['email']}")
         if owner_config.get("phone"):

@@ -239,6 +239,23 @@ _COMPLETE_INIT_TOOL = {
                 "type": "string",
                 "description": "The owner's email address (required for daily stats reports)",
             },
+            "owner_bio": {
+                "type": "string",
+                "description": (
+                    "A brief description of who the owner is - their role, profession, "
+                    "interests, or background. E.g. 'VC focused on AI startups' or "
+                    "'software engineer working on developer tools'. 1-3 sentences."
+                ),
+            },
+            "owner_goal": {
+                "type": "string",
+                "description": (
+                    "How the owner hopes this AI assistant will help them - what kinds "
+                    "of tasks, what areas of their life/work, what they'd find most valuable. "
+                    "E.g. 'Help me stay on top of AI news, manage deal flow, and draft investor updates'. "
+                    "1-3 sentences."
+                ),
+            },
             "owner_phone": {
                 "type": "string",
                 "description": "Owner's phone number in E.164 format (e.g. +15551234567). Needed for SMS channel.",
@@ -286,6 +303,10 @@ def _build_system_prompt(existing: dict) -> str:
         existing_lines.append(f"- Owner name: {existing['owner_name']}")
     if existing.get("owner_email"):
         existing_lines.append(f"- Owner email: {existing['owner_email']}")
+    if existing.get("owner_bio"):
+        existing_lines.append(f"- Owner bio: {existing['owner_bio']}")
+    if existing.get("owner_goal"):
+        existing_lines.append(f"- Owner goal for agent: {existing['owner_goal']}")
     if existing.get("owner_phone"):
         existing_lines.append(f"- Owner phone: {existing['owner_phone']}")
     if existing.get("owner_timezone"):
@@ -341,6 +362,15 @@ Required:
   - Owner's name (for personalization)
   - Owner's email (for daily stats reports and as owner identifier)
 
+Strongly Recommended (these help the agent be genuinely useful from day one):
+  - A brief bio of the owner: who they are, what they do, their role/profession, interests.
+    This helps the agent understand context and tailor its behavior. Even one sentence helps.
+    Examples: "I'm a VC focused on AI startups", "I'm a freelance designer juggling multiple clients"
+  - How the owner wants the agent to help: what tasks, what areas of life/work, what would be most valuable.
+    This directly shapes the agent's daily self-improvement - it will proactively build skills and
+    set up tasks aligned with these goals.
+    Examples: "Help me track AI news and manage deal flow", "Help me stay organized and handle client emails"
+
 Recommended:
   - AgentMail API key (for email channel - get at https://agentmail.to)
   - SendBlue API key + secret (for SMS - get at https://sendblue.co)
@@ -354,6 +384,9 @@ YOUR BEHAVIOR:
 - Start by briefly introducing yourself and explaining you'll help set up BabyAGI
 - Be conversational. Let the user provide info naturally. Don't interrogate.
 - If the user gives multiple pieces of info at once, acknowledge all of them
+- Early in the conversation, ask the user to tell you a bit about themselves and how they hope this agent will help.
+  Frame it naturally: "Tell me a bit about yourself and what you'd like me to help you with."
+  This is important - it shapes how the agent improves itself over time. But don't force it if they want to skip.
 - Answer questions about BabyAGI, channels, memory, or anything else knowledgeably
 - Proactively explain what AgentMail and SendBlue are when asking for their keys
 - If the user doesn't have an API key, explain where to get one and that they can skip it for now
@@ -591,6 +624,8 @@ def _detect_existing_config(config: dict) -> dict:
     return {
         "owner_name": owner.get("name") or os.environ.get("OWNER_NAME", ""),
         "owner_email": owner.get("email") or os.environ.get("OWNER_EMAIL", ""),
+        "owner_bio": owner.get("bio") or os.environ.get("OWNER_BIO", ""),
+        "owner_goal": owner.get("goal") or os.environ.get("OWNER_GOAL", ""),
         "owner_phone": owner.get("phone") or os.environ.get("OWNER_PHONE", ""),
         "owner_timezone": owner.get("timezone") or os.environ.get("OWNER_TIMEZONE", ""),
         "agent_name": config.get("agent", {}).get("name") or os.environ.get("AGENT_NAME", ""),
@@ -608,6 +643,8 @@ def _apply_init_result(config: dict, result: dict):
         config["owner"] = {}
     config["owner"]["name"] = result.get("owner_name", "")
     config["owner"]["email"] = result.get("owner_email", "")
+    config["owner"]["bio"] = result.get("owner_bio", "")
+    config["owner"]["goal"] = result.get("owner_goal", "")
     config["owner"]["phone"] = result.get("owner_phone", "")
     config["owner"]["timezone"] = result.get("owner_timezone", "")
     config["owner"]["contacts"] = {
@@ -625,6 +662,10 @@ def _apply_init_result(config: dict, result: dict):
         os.environ["OWNER_NAME"] = result["owner_name"]
     if result.get("owner_email"):
         os.environ["OWNER_EMAIL"] = result["owner_email"]
+    if result.get("owner_bio"):
+        os.environ["OWNER_BIO"] = result["owner_bio"]
+    if result.get("owner_goal"):
+        os.environ["OWNER_GOAL"] = result["owner_goal"]
     if result.get("owner_phone"):
         os.environ["OWNER_PHONE"] = result["owner_phone"]
     if result.get("owner_timezone"):
@@ -668,6 +709,8 @@ def _save_init_state(result: dict):
     state = {
         "owner_email": result.get("owner_email", ""),
         "owner_name": result.get("owner_name", ""),
+        "owner_bio": result.get("owner_bio", ""),
+        "owner_goal": result.get("owner_goal", ""),
         "initialized_at": datetime.now(timezone.utc).isoformat(),
         "agentmail_configured": bool(result.get("agentmail_api_key")),
         "sendblue_configured": bool(

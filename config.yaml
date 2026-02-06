@@ -6,6 +6,8 @@ owner:
   id: "${OWNER_ID:owner}"
   name: "${OWNER_NAME:}"
   email: "${OWNER_EMAIL:}"
+  bio: "${OWNER_BIO:}"          # Brief description of who the owner is (role, profession, interests)
+  goal: "${OWNER_GOAL:}"        # How the owner wants this agent to help them
   phone: "${OWNER_PHONE:}"
   timezone: "${OWNER_TIMEZONE:}"
   contacts:
