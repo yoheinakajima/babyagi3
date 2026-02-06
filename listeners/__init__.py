@@ -22,5 +22,6 @@ Usage:
 from listeners.cli import run_cli_listener
 from listeners.email import run_email_listener
 from listeners.voice import run_voice_listener
+from listeners.sendblue import run_sendblue_listener
 
-__all__ = ["run_cli_listener", "run_email_listener", "run_voice_listener"]
+__all__ = ["run_cli_listener", "run_email_listener", "run_voice_listener", "run_sendblue_listener"]
