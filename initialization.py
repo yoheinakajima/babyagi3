@@ -16,16 +16,22 @@ Design principles:
       loop separate from the Agent class (which doesn't exist yet at init time).
     - The `complete_initialization` tool captures structured data from the
       conversation and applies it to config/env in one shot.
+    - If the user already provided the minimum config (owner name + email)
+      via environment variables or config.yaml, the wizard is skipped entirely
+      and the agent starts immediately.
 
 Flow:
-    1. Detect first run (no ~/.babyagi/initialized marker)
-    2. Create lightweight LLM client (no Agent, no memory, no tools)
-    3. Run conversation loop with rich system prompt + one tool
+    1. Check if already initialized (marker exists) → skip
+    2. Check if manually configured (name + email present) → auto-mark, skip
+    3. Otherwise: create lightweight LLM client, run setup conversation
     4. LLM guides user, answers questions, collects info naturally
     5. LLM calls complete_initialization tool with structured data
     6. Apply config, set env vars, validate services, write marker
     7. Schedule daily tasks after agent starts (separate step)
     8. Discard all conversation context
+    9. Agent starts seamlessly — no restart needed
+
+Re-run setup anytime with: python main.py init
 """
 
 import os
@@ -57,12 +63,51 @@ _RESET = "\033[0m"
 # Public API
 # =============================================================================
 
-def needs_initialization() -> bool:
-    """Check if BabyAGI needs first-time initialization."""
-    return not INIT_MARKER.exists()
+def needs_initialization(config: dict | None = None) -> bool:
+    """Check if BabyAGI needs first-time initialization.
+
+    Returns False (no wizard needed) if:
+      1. The marker file already exists (previously initialized), OR
+      2. The minimum required config (owner name + email) is already present
+         from env vars or config.yaml — in which case the marker is written
+         automatically so the wizard never triggers.
+
+    Args:
+        config: Loaded config dict. If None, only checks the marker file.
+    """
+    if INIT_MARKER.exists():
+        return False
+
+    # If config is provided, check whether the user has already supplied
+    # the minimum required info manually (env vars, config.yaml, etc.)
+    if config is not None and _is_sufficiently_configured(config):
+        # Auto-mark as initialized — no wizard needed
+        owner = config.get("owner", {})
+        _write_marker({"owner_name": owner.get("name", ""), "owner_email": owner.get("email", "")})
+        _save_init_state({
+            "owner_name": owner.get("name", ""),
+            "owner_email": owner.get("email", ""),
+            "owner_bio": owner.get("bio", ""),
+            "owner_goal": owner.get("goal", ""),
+        })
+        return False
+
+    return True
 
 
-def run_initialization(config: dict) -> dict:
+def _is_sufficiently_configured(config: dict) -> bool:
+    """Check if the minimum required owner info is already present.
+
+    The wizard exists to collect owner name and email at minimum. If both
+    are already set (from env vars or config.yaml), the wizard can be skipped.
+    """
+    owner = config.get("owner", {})
+    name = owner.get("name") or os.environ.get("OWNER_NAME", "")
+    email = owner.get("email") or os.environ.get("OWNER_EMAIL", "")
+    return bool(name.strip()) and bool(email.strip())
+
+
+def run_initialization(config: dict, force: bool = False) -> dict:
     """Run the LLM-driven interactive initialization.
 
     Creates a lightweight LLM client and runs a conversation loop where
@@ -74,10 +119,14 @@ def run_initialization(config: dict) -> dict:
 
     Args:
         config: The loaded config dict (will be modified in-place).
+        force: If True, run even if already initialized (for re-init via ``python main.py init``).
 
     Returns:
         Updated config dict with user-provided values applied.
     """
+    if force:
+        reset_initialization()
+
     _print_welcome_banner()
 
     # Detect what's already configured
@@ -92,7 +141,8 @@ def run_initialization(config: dict) -> dict:
     except Exception as e:
         logger.warning("Could not create LLM client for interactive init: %s", e)
         print(f"\n  {_YELLOW}Could not start interactive setup: {e}{_RESET}")
-        print(f"  {_DIM}Please configure manually via config.yaml and environment variables.{_RESET}\n")
+        print(f"  {_DIM}Configure manually via config.yaml / environment variables,{_RESET}")
+        print(f"  {_DIM}or re-run setup with: python main.py init{_RESET}\n")
         _write_marker({"name": "", "email": ""})
         return config
 
@@ -107,10 +157,22 @@ def run_initialization(config: dict) -> dict:
     else:
         # User quit or conversation failed - still mark as initialized
         # so we don't block startup repeatedly
-        print(f"\n  {_DIM}Setup incomplete. You can reconfigure by deleting ~/.babyagi/initialized{_RESET}\n")
+        print(f"\n  {_DIM}Setup skipped. Re-run anytime with: python main.py init{_RESET}\n")
         _write_marker({"name": "", "email": ""})
 
     return config
+
+
+def reset_initialization():
+    """Remove initialization marker so the wizard can run again.
+
+    Called by ``python main.py init``.  No need to manually delete files.
+    """
+    for path in (INIT_MARKER, INIT_STATE_FILE):
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def schedule_post_init_tasks(agent):
@@ -401,7 +463,8 @@ Two daily tasks will be automatically scheduled:
 1. Daily Stats Report - detailed usage analytics emailed to the owner
 2. Daily Self-Improvement - the agent independently finds ways to be more helpful
 
-The user can always reconfigure later by editing config.yaml or deleting ~/.babyagi/initialized."""
+The user can always reconfigure later by editing config.yaml, setting environment variables,
+or re-running setup with: python main.py init"""
 
 
 # =============================================================================
@@ -446,7 +509,9 @@ def _run_init_conversation(client, model: str, system_prompt: str, config: dict)
     Returns:
         Dict with initialization data, or None if user quit.
     """
-    messages = []
+    # Seed with an initial user message so the LLM has something to respond to.
+    # Anthropic requires at least one non-system message.
+    messages = [{"role": "user", "content": "Hi, I'd like to set up BabyAGI."}]
     tool = _COMPLETE_INIT_TOOL
     max_turns = 30  # Safety limit
 
@@ -749,17 +814,8 @@ def _print_welcome_banner():
 
 
 def _print_completion():
-    """Print post-initialization info."""
+    """Print a brief transition message. Keep it light — the agent is about to greet the user."""
     print(f"""
-{_BOLD}{_GREEN}{'=' * 60}
-   Setup Complete!
-{'=' * 60}{_RESET}
-
-{_DIM}Two daily tasks have been scheduled:
-  1. Daily Stats Report (first run in ~5 min, then every 24h)
-  2. Daily Self-Improvement (first run in ~1h, then every 24h)
-
-Reconfigure anytime: delete ~/.babyagi/initialized and restart.{_RESET}
-
-{_BOLD}Starting your agent...{_RESET}
+{_GREEN}  Setup complete.{_RESET} {_DIM}Two daily tasks scheduled (stats report & self-improvement).
+  Re-run setup anytime with: python main.py init{_RESET}
 """)
