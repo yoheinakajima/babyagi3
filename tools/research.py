@@ -41,7 +41,6 @@ Recommended usage for long-running research:
    export_collection(name="vc_list", output_path="~/Downloads/vcs.csv")
 """
 
-import asyncio
 import csv
 import io
 import json

@@ -161,10 +161,10 @@ Items that need to be addressed before public release. Organized by priority.
 - [ ] Add test suite (`tests/`)
 - [ ] Replace broad `except Exception` handlers
 - [ ] Fix voice listener platform issues
-- [ ] Fix .gitignore (add `*.db`, fix typo)
+- [x] Fix .gitignore (add `*.db`, fix typo)
 - [ ] Add `LICENSE` file
-- [ ] Add optional dependency group for voice
-- [ ] Remove unused `import asyncio` in `tools/research.py`
+- [x] Add optional dependency group for voice
+- [x] Remove unused `import asyncio` in `tools/research.py`
 - [ ] Implement workflow tool logic
 - [ ] Implement file search semantic integration
 - [ ] Add structured logging

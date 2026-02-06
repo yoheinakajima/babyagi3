@@ -29,6 +29,9 @@ dependencies = [
     "composio>=0.10.0",
 ]
 
+[project.optional-dependencies]
+voice = ["sounddevice", "numpy", "openai-whisper", "pyttsx3", "scipy"]
+
 [project.scripts]
 agent = "agent:main"
 server = "server:app"

@@ -44,9 +44,14 @@ env/
 *.pem
 secrets.json
 
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
 # OS
 .DS_Store
 Thumbs.db
 
 # Replit
-attaches_assets/
+attached_assets/
