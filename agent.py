@@ -242,6 +242,11 @@ class Agent(EventEmitter):
         # access the same conversation thread concurrently
         self._thread_locks: dict[str, asyncio.Lock] = {}
 
+        # Activity tracking for priority-aware background tasks.
+        # Updated on every interactive message. Background extraction checks this
+        # to yield to interactive traffic (prevents extraction from starving chat).
+        self._last_interactive_activity: float | None = None
+
         # Multi-channel support
         self.senders: dict[str, "Sender"] = {}  # Channel senders for output
         self.config = config or {}  # Agent configuration
@@ -824,6 +829,10 @@ Work autonomously. Use tools as needed. When done, provide a brief summary of wh
         async with self._get_thread_lock(thread_id):
             context = context or {"channel": "cli", "is_owner": True}
             self._current_context = context
+
+            # Track interactive activity so background tasks can yield
+            if not thread_id.startswith("objective_"):
+                self._last_interactive_activity = time.time()
 
             thread = self.threads.setdefault(thread_id, [])
 

@@ -156,7 +156,8 @@ async def run_cli_only():
             from memory.integration import create_extraction_background_task
             extraction_loop = create_extraction_background_task(
                 agent.memory,
-                interval_seconds=memory_config.get("extraction_interval", 60)
+                interval_seconds=memory_config.get("extraction_interval", 60),
+                agent=agent,
             )
             background_tasks.append(asyncio.create_task(extraction_loop()))
 
@@ -209,7 +210,8 @@ async def run_all_channels():
             from memory.integration import create_extraction_background_task
             extraction_loop = create_extraction_background_task(
                 agent.memory,
-                interval_seconds=memory_config.get("extraction_interval", 60)
+                interval_seconds=memory_config.get("extraction_interval", 60),
+                agent=agent,
             )
             tasks.append(extraction_loop())
 
@@ -312,7 +314,8 @@ async def run_all_with_server(port: int = 5000):
             from memory.integration import create_extraction_background_task
             extraction_loop = create_extraction_background_task(
                 agent.memory,
-                interval_seconds=memory_config.get("extraction_interval", 60)
+                interval_seconds=memory_config.get("extraction_interval", 60),
+                agent=agent,
             )
             tasks.append(extraction_loop())
 
