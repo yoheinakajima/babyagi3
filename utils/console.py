@@ -6,12 +6,12 @@ Supports verbose levels for showing internal operations.
 
 Verbose Levels:
     - OFF (0): No verbose output, just user/agent messages
-    - LIGHT (1): Key operations only (tool names, task starts)
+    - LIGHT (1): Key operations only (tool names, task starts) [default]
     - DEEP (2): Everything (tool inputs/outputs, full details)
 
 Configuration:
     - Environment: BABYAGI_VERBOSE=0|1|2 or off|light|deep
-    - Runtime: console.set_verbose(level)
+    - Runtime: console.set_verbose(level) or tell the agent "turn off verbose"
 
 Colors:
     - User messages: Green
@@ -163,8 +163,8 @@ class Console:
         self._filter_categories: set[str] | None = None  # None = all categories
 
     def _load_verbose_level(self) -> VerboseLevel:
-        """Load verbose level from environment."""
-        env_val = os.environ.get("BABYAGI_VERBOSE", "0")
+        """Load verbose level from environment. Defaults to LIGHT."""
+        env_val = os.environ.get("BABYAGI_VERBOSE", "1")
         return parse_verbose_level(env_val)
 
     def set_verbose(self, level: VerboseLevel | int | str):

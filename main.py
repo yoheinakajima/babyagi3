@@ -23,8 +23,8 @@ Configuration:
 
 Verbose Output:
     Control with BABYAGI_VERBOSE environment variable or config.yaml:
-    - 0/off: No verbose output (default)
-    - 1/light: Key operations (tool names, task starts)
+    - 0/off: No verbose output
+    - 1/light: Key operations (tool names, task starts) [default]
     - 2/deep: Everything (inputs, outputs, full details)
 
     Runtime toggle: /verbose [off|light|deep]
@@ -157,7 +157,7 @@ async def run_cli_only():
 
     # Configure verbose level from config (env var takes precedence)
     if not os.environ.get("BABYAGI_VERBOSE"):
-        verbose_config = config.get("verbose", "off")
+        verbose_config = config.get("verbose", "light")
         console.set_verbose(verbose_config)
         configure_logging_for_verbose(verbose_config)
 
@@ -203,7 +203,7 @@ async def run_all_channels():
 
     # Configure verbose level from config (env var takes precedence)
     if not os.environ.get("BABYAGI_VERBOSE"):
-        verbose_config = config.get("verbose", "off")
+        verbose_config = config.get("verbose", "light")
         console.set_verbose(verbose_config)
         configure_logging_for_verbose(verbose_config)
 
@@ -310,7 +310,7 @@ async def run_all_with_server(port: int = 5000):
 
     # Configure verbose level from config (env var takes precedence)
     if not os.environ.get("BABYAGI_VERBOSE"):
-        verbose_config = config.get("verbose", "off")
+        verbose_config = config.get("verbose", "light")
         console.set_verbose(verbose_config)
         configure_logging_for_verbose(verbose_config)
 
