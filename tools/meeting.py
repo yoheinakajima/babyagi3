@@ -253,10 +253,11 @@ class RecallClient:
 
         # Add real-time webhook endpoints if configured
         if self.webhook_url:
+            ws_url = self.webhook_url.replace("https://", "wss://").replace("http://", "ws://")
             payload["recording_config"]["realtime_endpoints"] = [
                 {
-                    "type": "webhook",
-                    "url": f"{self.webhook_url}/webhooks/recall/realtime",
+                    "type": "websocket",
+                    "url": f"{ws_url}/webhooks/recall/realtime",
                     "events": [
                         "transcript.data",
                         "transcript.partial_data",

@@ -11,12 +11,13 @@ This enables external systems to interact with the agent via HTTP.
 """
 
 import asyncio
+import json
 import logging
 import os
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI, BackgroundTasks, Request, Header, HTTPException
+from fastapi import FastAPI, BackgroundTasks, Request, Header, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
 from agent import Agent, Objective
@@ -364,18 +365,70 @@ async def sendblue_webhook(
 # Recall.ai Webhooks
 # =============================================================================
 
+@app.websocket("/webhooks/recall/realtime")
+async def recall_realtime_websocket(websocket: WebSocket):
+    """
+    Receive real-time transcript data from Recall.ai via WebSocket.
+
+    Recall.ai connects to this endpoint and streams transcript chunks
+    as JSON messages during the meeting.
+    """
+    await websocket.accept()
+    logger.info("Recall.ai realtime WebSocket connected")
+
+    try:
+        while True:
+            raw = await websocket.receive_text()
+            try:
+                payload = json.loads(raw)
+            except Exception as e:
+                logger.error(f"Failed to parse Recall realtime WS message: {e}")
+                continue
+
+            event_type = payload.get("event", "")
+            data = payload.get("data", {})
+
+            if event_type in ("transcript.data", "transcript.partial_data"):
+                transcript_data = data.get("data", {})
+                bot_info = data.get("bot", {})
+                bot_id = bot_info.get("id", "")
+
+                participant = transcript_data.get("participant", {})
+                words = transcript_data.get("words", [])
+                speaker = participant.get("name", "unknown")
+                text = " ".join(w.get("text", "") for w in words)
+
+                if bot_id and text:
+                    logger.info(f"Recall realtime [{event_type}] bot={bot_id}: {speaker}: {text[:100]}")
+                    try:
+                        from tools.meeting import get_meeting_processor
+                        processor = get_meeting_processor()
+                        segment = {
+                            "speaker": speaker,
+                            "speaker_id": participant.get("id"),
+                            "words": words,
+                            "is_final": event_type == "transcript.data",
+                        }
+                        processor.add_transcript_segment(bot_id, segment)
+                    except Exception as e:
+                        logger.error(f"Error processing realtime transcript: {e}")
+            else:
+                logger.debug(f"Recall realtime WS event: {event_type}")
+
+    except WebSocketDisconnect:
+        logger.info("Recall.ai realtime WebSocket disconnected")
+    except Exception as e:
+        logger.error(f"Recall realtime WebSocket error: {e}")
+
+
 @app.post("/webhooks/recall/realtime")
 async def recall_realtime_webhook(
     request: Request,
     background_tasks: BackgroundTasks,
 ):
     """
-    Receive real-time transcript data from Recall.ai.
-
-    This endpoint receives transcript chunks as they're generated during the meeting.
-    Used for live backchannel insights via SMS.
-
-    Configure this URL in your Recall.ai bot's realtime_endpoints.
+    Fallback POST handler for real-time transcript data from Recall.ai.
+    Kept for backward compatibility if webhook type is used.
     """
     try:
         payload = await request.json()
@@ -391,7 +444,6 @@ async def recall_realtime_webhook(
 
     logger.debug(f"Recall realtime transcript for bot {bot_id}: {transcript.get('speaker', 'unknown')}")
 
-    # Process in background
     async def process_realtime():
         try:
             from tools.meeting import get_meeting_processor
