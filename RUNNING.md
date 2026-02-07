@@ -176,11 +176,14 @@ python main.py serve 8080    # Custom port
 
 Starts a FastAPI HTTP server. No CLI input — interact via REST API.
 
+> If the server is accessed from a non-localhost host, API auth is enforced by default (`BABYAGI_API_AUTH=auto`). Set `BABYAGI_API_TOKEN` and send `Authorization: Bearer <token>` (or `X-API-Token`) on requests.
+
 ### Send a message
 
 ```bash
 curl -X POST http://localhost:5000/message \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $BABYAGI_API_TOKEN" \
   -d '{"content": "Hello! Remember that my name is Alice.", "thread_id": "main"}'
 ```
 
@@ -197,6 +200,7 @@ Response:
 ```bash
 curl -X POST http://localhost:5000/message \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $BABYAGI_API_TOKEN" \
   -d '{"content": "Research AI trends", "thread_id": "main", "async_mode": true}'
 ```
 

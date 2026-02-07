@@ -149,7 +149,7 @@ class TestScheduleNextRun:
         """Passing a naive datetime should still work (treated as UTC)."""
         future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
         s = Schedule(kind="at", at=future)
-        nxt = s.next_run(after=datetime.utcnow())
+        nxt = s.next_run(after=datetime.now(timezone.utc))
         assert nxt is not None
 
 
