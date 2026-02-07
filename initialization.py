@@ -37,6 +37,7 @@ Re-run setup anytime with: python main.py init
 import getpass
 import os
 import re
+import secrets
 import sys
 import json
 import uuid
@@ -578,7 +579,14 @@ Let the user know that after this conversation finishes, they will be given a se
 to enter API keys. At that prompt their input is hidden and never sent to the AI.
 If they prefer, they can still paste keys directly in this chat — those will work too
 and will be persisted to keyring. But the secure prompt is the recommended approach.
-Do NOT pressure the user for API keys during the conversation — just mention the secure prompt."""
+Do NOT pressure the user for API keys during the conversation — just mention the secure prompt.
+
+IMPORTANT - API TOKEN:
+The secure prompt will also offer to generate a BABYAGI_API_TOKEN. This token protects
+the HTTP API when accessed from non-localhost hosts. If skipped, the API will still work
+but without authentication (less secure). The user can always generate one later via
+environment variables or .env file. Do NOT ask for the API token during conversation —
+it is handled automatically at the secure prompt."""
 
 
 # =============================================================================
@@ -866,7 +874,10 @@ def _collect_keys_directly(result: dict) -> dict:
         if not result.get(f) and not os.environ.get(env)
     ]
 
-    if not needed_secrets and not needed_other:
+    # Check if an API token is needed
+    needs_api_token = not result.get("api_token") and not os.environ.get("BABYAGI_API_TOKEN")
+
+    if not needed_secrets and not needed_other and not needs_api_token:
         return result
 
     # --- header ---
@@ -880,6 +891,26 @@ def _collect_keys_directly(result: dict) -> dict:
     print(f"  {_DIM}  - Replit secrets (if on Replit){_RESET}")
     print(f"  {_DIM}  - Telling the agent: \"set SENDBLUE_API_KEY to ...\"{_RESET}")
     print()
+
+    # --- API token generation ---
+    if needs_api_token:
+        print(f"  {_BOLD}API Token{_RESET}")
+        print(f"  {_DIM}Secures the HTTP API when accessed from non-localhost.{_RESET}")
+        print(f"  {_DIM}Without it, the API will be open to unauthenticated access.{_RESET}")
+        try:
+            answer = input(f"  Generate a secure API token? [Y/n]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            answer = ""
+        if answer in ("", "y", "yes"):
+            token = secrets.token_urlsafe(32)
+            result["api_token"] = token
+            print(f"  {_GREEN}Generated BABYAGI_API_TOKEN{_RESET}")
+            print(f"  {_DIM}Token: {token}{_RESET}")
+            print(f"  {_DIM}Save this token — you'll need it for external API calls.{_RESET}")
+        else:
+            print(f"  {_DIM}Skipped. The API will allow unauthenticated access from non-localhost.{_RESET}")
+        print()
 
     # Suppress all logging while prompting so background output doesn't
     # interfere with the (invisible) user input.
@@ -983,12 +1014,17 @@ def _apply_init_result(config: dict, result: dict):
     if result.get("composio_api_key"):
         os.environ["COMPOSIO_API_KEY"] = result["composio_api_key"]
 
+    # API token for HTTP auth
+    if result.get("api_token"):
+        os.environ["BABYAGI_API_TOKEN"] = result["api_token"]
+
     # Persist secrets to keyring for cross-restart persistence
     _keyring_map = {
         "agentmail_api_key": "AGENTMAIL_API_KEY",
         "sendblue_api_key": "SENDBLUE_API_KEY",
         "sendblue_api_secret": "SENDBLUE_API_SECRET",
         "composio_api_key": "COMPOSIO_API_KEY",
+        "api_token": "BABYAGI_API_TOKEN",
     }
     for field, env_name in _keyring_map.items():
         val = result.get(field)
