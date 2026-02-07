@@ -313,6 +313,8 @@ def get_all_tools(tool_class):
     # Note: research_agent provides delegation tools (research_task, research_status)
     # The detailed research tools are only used by the research agent itself
     from tools import web, email, secrets, verbose, credentials, metrics, research_agent, meeting, files, testing
+    from tools.optional import load_optional_tools
+    load_optional_tools()
 
     tools = []
     for info in _registered_tools:
@@ -338,6 +340,8 @@ def get_registered_tool_info() -> list[dict]:
     # Ensure tools are imported
     try:
         from tools import web, email, secrets, verbose, credentials, metrics, research_agent, meeting, files, testing
+        from tools.optional import load_optional_tools
+        load_optional_tools()
     except ImportError:
         pass
 

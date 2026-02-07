@@ -201,6 +201,29 @@ You: Send a message to #general on Slack
 
 Requires `composio login` or `COMPOSIO_API_KEY`.
 
+
+### Optional API tools (off by default)
+
+There is now a `tools/optional/` folder with additional API integrations that only load when their API key env vars are present.
+
+- `PEOPLEDATALABS_API_KEY`
+- `VOILANORBERT_API_KEY`
+- `HUNTER_API_KEY`
+- `EXA_API_KEY`
+- `HAPPENSTANCE_API_KEY`
+- `X_API_BEARER_TOKEN`
+- `RUNWAY_API_KEY`
+- `ELEVENLABS_API_KEY`
+- `VIDEODB_API_KEY`
+- `GODADDY_API_KEY` + `GODADDY_API_SECRET`
+- `SHOPIFY_ACCESS_TOKEN` + `SHOPIFY_STORE_DOMAIN`
+- `PRINTFUL_API_KEY`
+- `GITHUB_TOKEN`
+
+If a key is missing, the related tool is ignored and not registered.
+
+> Note: these optional integrations are scaffolded against current public API docs and patterns, but not all endpoints have been thoroughly live-tested in this repo yet.
+
 ---
 
 ## Configuration
