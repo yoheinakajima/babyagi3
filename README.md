@@ -22,6 +22,14 @@ That's it. You now have a persistent AI agent with memory, scheduling, backgroun
 
 Verbose mode is on by default — you'll see tool calls, webhook activity, and background operations as they happen. To turn it off, just tell the agent "turn off verbose" or type `/verbose off`.
 
+## Dev Bootstrap (one command)
+
+```bash
+uv sync --group dev && uv run pytest -q
+```
+
+This installs runtime + development dependencies, then runs the test suite in one step.
+
 ## Initialization
 
 BabyAGI figures out the right setup path automatically — no manual file management needed.
@@ -478,3 +486,48 @@ Optional (voice): `sounddevice`, `numpy`, `openai-whisper`, `pyttsx3`.
 ## License
 
 MIT
+
+---
+
+## Production hardening
+
+If you deploy BabyAGI outside localhost (VM, container, cloud host), treat the HTTP API as an internet-exposed control plane.
+
+### 1) Network exposure warnings
+
+- **Do not expose port 5000 publicly without auth.** Endpoints like `/message` and webhook routes can trigger real actions.
+- The server now supports token auth with `BABYAGI_API_TOKEN`, and in `auto` mode auth is enforced by default for non-localhost hosts.
+- For local development, auth stays off by default when accessed via `localhost`/`127.0.0.1`/`::1`.
+
+Recommended environment variables:
+
+```bash
+export BABYAGI_API_AUTH=auto         # default: require auth for non-localhost
+export BABYAGI_API_TOKEN='<long-random-token>'
+```
+
+Send either header on protected requests:
+
+```bash
+-H "Authorization: Bearer $BABYAGI_API_TOKEN"
+# or
+-H "X-API-Token: $BABYAGI_API_TOKEN"
+```
+
+### 2) Reverse proxy and authentication recommendations
+
+- Put BabyAGI behind a reverse proxy (Nginx, Caddy, Traefik, Cloudflare Tunnel, etc.).
+- Terminate TLS at the proxy (`https://` only).
+- Add an outer auth layer at the edge (Basic auth, SSO, OAuth2 proxy, mTLS, IP allowlists).
+- Restrict webhook paths to only expected providers where possible.
+- Apply request size/time limits and rate limiting before traffic reaches the app.
+
+### 3) Secrets handling checklist
+
+- [ ] Keep API keys in environment variables or a secrets manager (never commit to git).
+- [ ] Use unique, high-entropy `BABYAGI_API_TOKEN` values per environment.
+- [ ] Rotate keys/tokens regularly and immediately after suspected exposure.
+- [ ] Use separate credentials for dev/staging/prod.
+- [ ] Scrub logs/monitoring for accidental secret leakage.
+- [ ] Prefer least-privilege credentials for third-party integrations.
+

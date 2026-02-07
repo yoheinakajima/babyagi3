@@ -14,16 +14,46 @@ import asyncio
 import json
 import logging
 import os
+from hmac import compare_digest
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI, BackgroundTasks, Request, Header, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, BackgroundTasks, Request, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
 from agent import Agent, Objective
 from utils.console import console
 
 logger = logging.getLogger(__name__)
+
+
+def _get_request_host(request: Request) -> str:
+    """Extract host from request URL, stripping IPv6 brackets."""
+    host = (request.url.hostname or "").strip().lower()
+    return host[1:-1] if host.startswith("[") and host.endswith("]") else host
+
+
+def _is_local_host(host: str) -> bool:
+    """True when host points to a local development interface."""
+    return host in {"", "localhost", "127.0.0.1", "::1"}
+
+
+def _api_auth_enabled(request: Request) -> bool:
+    """Determine whether API auth should be enforced for this request.
+
+    BABYAGI_API_AUTH can be set to:
+    - "true"/"1"/"yes"/"on": always enforce
+    - "false"/"0"/"no"/"off": never enforce
+    - unset or "auto": enforce when host is not localhost
+    """
+    mode = os.environ.get("BABYAGI_API_AUTH", "auto").strip().lower()
+    if mode in {"1", "true", "yes", "on"}:
+        return True
+    if mode in {"0", "false", "no", "off"}:
+        return False
+
+    host = _get_request_host(request)
+    return not _is_local_host(host)
 
 
 # =============================================================================
@@ -68,6 +98,31 @@ app = FastAPI(
     description="HTTP interface for the agent with background objectives",
     lifespan=lifespan
 )
+
+
+@app.middleware("http")
+async def api_auth_middleware(request: Request, call_next):
+    """Protect HTTP API endpoints with token auth when enabled."""
+    if not _api_auth_enabled(request):
+        return await call_next(request)
+
+    expected_token = os.environ.get("BABYAGI_API_TOKEN", "").strip()
+    if not expected_token:
+        logger.error("API auth enforced but BABYAGI_API_TOKEN is not set")
+        raise HTTPException(
+            status_code=503,
+            detail="API auth is enabled but BABYAGI_API_TOKEN is not configured",
+        )
+
+    auth_header = (request.headers.get("authorization") or "").strip()
+    bearer_token = auth_header[7:].strip() if auth_header.lower().startswith("bearer ") else ""
+    header_token = (request.headers.get("x-api-token") or "").strip()
+    provided_token = bearer_token or header_token
+
+    if not provided_token or not compare_digest(provided_token, expected_token):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    return await call_next(request)
 
 
 # =============================================================================
