@@ -374,6 +374,20 @@ _COMPLETE_INIT_TOOL = {
                 "type": "string",
                 "description": "SendBlue API secret (required along with API key for SMS)",
             },
+            "sendblue_phone_number": {
+                "type": "string",
+                "description": (
+                    "The SendBlue phone number assigned to the user's account (the 'from' number for sending SMS). "
+                    "Found in the SendBlue dashboard. Required for sending messages. E.164 format (e.g. +15551234567)."
+                ),
+            },
+            "agentmail_inbox_id": {
+                "type": "string",
+                "description": (
+                    "Specific AgentMail inbox ID (email address) to use, if the user already has one. "
+                    "If not provided, a new inbox will be auto-created when an API key is given."
+                ),
+            },
         },
         "required": ["owner_name", "owner_email"],
     },
@@ -409,8 +423,12 @@ def _build_system_prompt(existing: dict) -> str:
         existing_lines.append(f"- Agent name: {existing['agent_name']}")
     if existing.get("agentmail_configured"):
         existing_lines.append("- AgentMail: already configured (API key detected)")
+    if existing.get("agentmail_inbox_id"):
+        existing_lines.append(f"- AgentMail inbox: {existing['agentmail_inbox_id']}")
     if existing.get("sendblue_configured"):
         existing_lines.append("- SendBlue: already configured (API key + secret detected)")
+    if existing.get("sendblue_phone_number"):
+        existing_lines.append(f"- SendBlue phone number: {existing['sendblue_phone_number']}")
 
     existing_section = ""
     if existing_lines:
@@ -435,7 +453,7 @@ BabyAGI is a persistent AI agent that runs in the background and communicates th
 2. COMMUNICATION CHANNELS:
    - CLI: Terminal chat (always available)
    - Email (AgentMail): Agent gets its own email address (@agentmail.to). Can send/receive emails, handle verifications, manage subscriptions. Requires AGENTMAIL_API_KEY from https://agentmail.to (free tier available).
-   - SMS/iMessage (SendBlue): Text the agent from your phone. Requires SENDBLUE_API_KEY and SENDBLUE_API_SECRET from https://sendblue.co. Also needs the owner's phone number to know which texts are from the owner.
+   - SMS/iMessage (SendBlue): Text the agent from your phone. Requires SENDBLUE_API_KEY, SENDBLUE_API_SECRET, and SENDBLUE_PHONE_NUMBER (the phone number assigned to the account, found in the SendBlue dashboard). Also needs the owner's phone number to know which texts are from the owner.
    - Voice: Speech input/output (optional, requires extra packages)
 
 3. CAPABILITIES:
@@ -467,12 +485,18 @@ Strongly Recommended (these help the agent be genuinely useful from day one):
 
 Recommended:
   - AgentMail API key (for email channel - get at https://agentmail.to)
+  - AgentMail inbox ID (if the user already has a specific inbox; otherwise one is auto-created)
   - SendBlue API key + secret (for SMS - get at https://sendblue.co)
-  - Owner's phone number (needed for SMS to identify owner messages)
+  - SendBlue phone number (the phone number assigned to the user's SendBlue account - found in their SendBlue dashboard. REQUIRED for sending SMS.)
+  - Owner's phone number (needed for SMS to identify which messages are from the owner vs external senders)
 
 Optional:
   - Owner's timezone (for scheduling)
   - Agent name (defaults to "Assistant")
+
+IMPORTANT: If the user provides SendBlue API credentials, you MUST also ask for their SendBlue phone number.
+Without it, the agent cannot send any SMS messages. This is the phone number assigned by SendBlue
+(visible in their dashboard), NOT the owner's personal phone number.
 {existing_section}
 YOUR BEHAVIOR:
 - Start by briefly introducing yourself and explaining you'll help set up BabyAGI
@@ -600,7 +624,11 @@ def _run_init_conversation(client, model: str, system_prompt: str, config: dict)
                 continue
 
             # Validate and attempt AgentMail connection
-            agentmail_result = _try_agentmail_connection(result.get("agentmail_api_key"))
+            # If user provided an inbox ID, use it; otherwise auto-create
+            agentmail_result = _try_agentmail_connection(
+                result.get("agentmail_api_key"),
+                result.get("agentmail_inbox_id"),
+            )
 
             # Build tool result to show the LLM what happened
             tool_result_data = {
@@ -682,13 +710,21 @@ def _run_init_conversation(client, model: str, system_prompt: str, config: dict)
 # Service Validation
 # =============================================================================
 
-def _try_agentmail_connection(api_key: str | None) -> dict:
+def _try_agentmail_connection(api_key: str | None, inbox_id: str | None = None) -> dict:
     """Try to connect to AgentMail and get/create an inbox.
+
+    Args:
+        api_key: AgentMail API key.
+        inbox_id: Specific inbox ID to use. If provided, skips auto-detection.
 
     Returns dict with inbox_id on success or error message on failure.
     """
     if not api_key:
         return {}
+
+    # If user provided a specific inbox ID, use it directly
+    if inbox_id:
+        return {"inbox_id": inbox_id, "status": "user_provided"}
 
     try:
         from agentmail import AgentMail
@@ -728,9 +764,11 @@ def _detect_existing_config(config: dict) -> dict:
         "owner_timezone": owner.get("timezone") or os.environ.get("OWNER_TIMEZONE", ""),
         "agent_name": config.get("agent", {}).get("name") or os.environ.get("AGENT_NAME", ""),
         "agentmail_configured": bool(os.environ.get("AGENTMAIL_API_KEY")),
+        "agentmail_inbox_id": os.environ.get("AGENTMAIL_INBOX_ID", ""),
         "sendblue_configured": bool(
             os.environ.get("SENDBLUE_API_KEY") and os.environ.get("SENDBLUE_API_SECRET")
         ),
+        "sendblue_phone_number": os.environ.get("SENDBLUE_PHONE_NUMBER", ""),
     }
 
 
@@ -783,16 +821,24 @@ def _apply_init_result(config: dict, result: dict):
             config["channels"]["email"] = {}
         config["channels"]["email"]["enabled"] = True
 
+    # AgentMail inbox ID (user-provided takes precedence over auto-created)
+    if result.get("agentmail_inbox_id"):
+        os.environ["AGENTMAIL_INBOX_ID"] = result["agentmail_inbox_id"]
+
     # SendBlue
     if result.get("sendblue_api_key") and result.get("sendblue_api_secret"):
         os.environ["SENDBLUE_API_KEY"] = result["sendblue_api_key"]
         os.environ["SENDBLUE_API_SECRET"] = result["sendblue_api_secret"]
+        if result.get("sendblue_phone_number"):
+            os.environ["SENDBLUE_PHONE_NUMBER"] = result["sendblue_phone_number"]
 
         if "channels" not in config:
             config["channels"] = {}
         if "sendblue" not in config["channels"]:
             config["channels"]["sendblue"] = {}
         config["channels"]["sendblue"]["enabled"] = True
+        if result.get("sendblue_phone_number"):
+            config["channels"]["sendblue"]["from_number"] = result["sendblue_phone_number"]
 
 
 # =============================================================================
