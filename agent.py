@@ -1028,10 +1028,15 @@ Work autonomously. Use tools as needed. When done, provide a brief summary of wh
                             # Store full result for later retrieval
                             self._full_tool_results[block.id] = result_json
 
+                            # Build task context so the summarizer knows what
+                            # data the agent needs and doesn't discard it.
+                            task_context = self._get_task_context(thread_id)
+
                             # Try LLM summarization first, fall back to truncation
                             summary = await summarize_tool_result(
                                 result_json, block.name,
                                 self.client, self._summarizer_model,
+                                task_context=task_context,
                             )
                             if summary is not None:
                                 result_json = summary
@@ -1692,6 +1697,43 @@ RESPONDING TO EXTERNAL REQUESTS:
             )
             return all_schemas[:self.MAX_FALLBACK_TOOL_SCHEMAS]
         return all_schemas
+
+    def _get_task_context(self, thread_id: str) -> str | None:
+        """Derive the current task/objective goal from a thread ID.
+
+        This provides the summarizer with enough context to know which fields
+        in a tool result are important.  Without it, the summarizer applies
+        generic heuristics (e.g. "keep IDs and counts, drop the rest") that
+        discard domain-specific data the agent actually needs — causing it to
+        hallucinate missing details.
+
+        Returns a short description of the current task goal, or None if the
+        thread isn't associated with a known task.
+        """
+        # Objective threads: "objective_<uuid>"
+        if thread_id.startswith("objective_"):
+            obj_id = thread_id.replace("objective_", "")
+            obj = self.objectives.get(obj_id)
+            if obj:
+                return obj.goal
+
+        # Scheduled task threads: "scheduled_<uuid>"
+        if thread_id.startswith("scheduled_"):
+            task_id = thread_id.replace("scheduled_", "")
+            task = self.scheduler.tasks.get(task_id)
+            if task:
+                return task.goal
+
+        # Main/interactive thread — try the first user message as context
+        thread = self.threads.get(thread_id, [])
+        if thread:
+            first_msg = thread[0]
+            content = first_msg.get("content", "")
+            if isinstance(content, str) and content:
+                # Use the first user message (truncated) as a hint
+                return content[:300]
+
+        return None
 
     @staticmethod
     def _is_context_overflow(exc: Exception) -> bool:

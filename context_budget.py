@@ -178,8 +178,18 @@ async def summarize_tool_result(
     tool_name: str,
     client,
     model: str,
+    task_context: str | None = None,
 ) -> str | None:
     """Summarize a large tool result using a fast LLM.
+
+    Args:
+        result_json: The raw JSON result string from the tool.
+        tool_name: Name of the tool that produced the result.
+        client: Anthropic client for LLM calls.
+        model: Model ID for the summarization call.
+        task_context: Optional description of the current task/objective goal.
+            When provided, the summarizer prioritizes data relevant to this goal
+            instead of applying generic heuristics that may discard critical fields.
 
     Returns the summarized JSON string, or None if summarization fails.
     """
@@ -191,15 +201,42 @@ async def summarize_tool_result(
         # summarization call itself. 40K chars ≈ 10K tokens input.
         summarizer_input = result_json[:40_000]
 
+        # Build context-aware system prompt so the summarizer knows what
+        # data the agent actually needs.  Without this, the summarizer
+        # uses generic heuristics ("keep IDs and counts") which drops
+        # domain-specific fields the agent requires (e.g. company names,
+        # valuations, deal amounts) leading to hallucinated responses.
+        if task_context:
+            system_msg = (
+                "You summarize API/tool results concisely while preserving data relevant to the current task. "
+                f"Current task context: {task_context}\n"
+                "Prioritize keeping fields and values that are relevant to the task above. "
+                "Also keep key data (IDs, names, counts, statuses). Output valid JSON. "
+                "For lists, try to include ALL items (not just the first few) with their task-relevant fields."
+            )
+        else:
+            system_msg = "You summarize API/tool results concisely. Keep key data (IDs, names, counts, statuses). Output valid JSON."
+
+        if task_context:
+            user_msg = (
+                f"Summarize this {tool_name} tool result into compact JSON, keeping all fields relevant to the task: {task_context}\n"
+                f"For lists, include ALL items with their key fields (not just the first few). "
+                f"Keep IDs, names, and any metrics/fields related to the task.\n\n{summarizer_input}"
+            )
+        else:
+            user_msg = (
+                f"Summarize this {tool_name} tool result into a compact JSON with the most important fields and values. "
+                f"If it's a list, include the count and first few items. "
+                f"Keep IDs, names, and key metrics.\n\n{summarizer_input}"
+            )
+
         response = await client.messages.create(
             model=model,
-            max_tokens=1024,
-            system="You summarize API/tool results concisely. Keep key data (IDs, names, counts, statuses). Output valid JSON.",
+            max_tokens=2048,
+            system=system_msg,
             messages=[{
                 "role": "user",
-                "content": f"Summarize this {tool_name} tool result into a compact JSON with the most important fields and values. "
-                           f"If it's a list, include the count and first few items. "
-                           f"Keep IDs, names, and key metrics.\n\n{summarizer_input}"
+                "content": user_msg,
             }],
         )
 
