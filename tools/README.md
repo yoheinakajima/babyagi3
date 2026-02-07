@@ -28,6 +28,7 @@ The tools subsystem provides all of BabyAGI's external capabilities. Tools are r
 | [`metrics.py`](metrics.py) | `get_cost_summary` — session cost tracking |
 | [`verbose.py`](verbose.py) | `set_verbose` — runtime verbosity control |
 | [`files/`](files/) | File processing, creation, and storage subsystem |
+| [`optional/`](optional/) | Optional API integrations, lazy-loaded only when matching API keys are set |
 
 ## Core Tools (defined in agent.py)
 
@@ -108,3 +109,15 @@ The `register_tool` core tool allows the agent to create new tools at runtime. T
 - [ARCHITECTURE.md](../ARCHITECTURE.md) — Tool system architecture diagram
 - [RUNNING.md](../RUNNING.md) — Examples of using tools from the CLI
 - [MODELS.md](../MODELS.md) — `ToolDefinition` data model
+
+## Optional Tools Loading
+
+The `tools/optional/` package keeps third-party integrations organized and out of the default tool list.
+
+- Optional modules are imported only when their required API key env vars are present.
+- If keys are missing, the module is skipped and no tool is registered.
+- This keeps startup clean while making integrations easy to enable by setting keys.
+
+Current optional providers include: People Data Labs, VoilaNorbert, Hunter.io, Exa, Happenstance, X API, RunwayML, ElevenLabs, VideoDB, GoDaddy, Shopify, Printful, and GitHub.
+
+> These wrappers are intentionally lightweight and not all provider endpoints are deeply tested in this repository.

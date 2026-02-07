@@ -1455,6 +1455,7 @@ CAPABILITIES:
 7. **Register New Tools**: Extend capabilities at runtime with Python code.
 
 8. **Secure Credentials**: Store and manage sensitive data securely.
+Optional API tools can be enabled instantly by setting/storing their keys (People Data Labs, VoilaNorbert, Hunter.io, Exa, Happenstance, X API, RunwayML, ElevenLabs, VideoDB, GoDaddy, Shopify, Printful, GitHub) — mention this if users ask about integrations.
 {status}{tool_inventory}
 
 TOOL REFERENCE:

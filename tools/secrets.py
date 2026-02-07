@@ -91,6 +91,34 @@ def _check_secret(name: str) -> dict:
     }
 
 
+
+
+def _refresh_optional_tools_if_needed(agent=None) -> list[str]:
+    """Load optional tool modules and register any newly available tools."""
+    try:
+        from tools.optional import load_optional_tools
+        loaded_modules = load_optional_tools()
+    except Exception:
+        return []
+
+    if not agent:
+        return loaded_modules
+
+    # Best effort: if we have an agent instance, refresh tool registrations
+    # so newly configured optional tools are callable immediately.
+    try:
+        from agent import Tool
+        from tools import get_all_tools
+
+        existing = set(agent.tools.keys()) if hasattr(agent, "tools") else set()
+        for tool in get_all_tools(Tool):
+            if hasattr(agent, "register"):
+                agent.register(tool)
+        updated = set(agent.tools.keys()) if hasattr(agent, "tools") else set()
+        return sorted(updated - existing)
+    except Exception:
+        return loaded_modules
+
 @tool(packages=["keyring"])
 def get_secret(name: str) -> dict:
     """Retrieve a stored secret/API key.
@@ -106,7 +134,7 @@ def get_secret(name: str) -> dict:
 
 
 @tool(packages=["keyring"])
-def store_secret(name: str, value: str) -> dict:
+def store_secret(name: str, value: str, agent=None) -> dict:
     """Store a secret/API key securely.
 
     Use this after retrieving an API key (e.g., from browser automation)
@@ -149,29 +177,35 @@ def store_secret(name: str, value: str) -> dict:
     if keyring:
         try:
             keyring.set_password(KEYRING_SERVICE, env_var, value)
+            newly_enabled_tools = _refresh_optional_tools_if_needed(agent)
             return {
                 "stored": True,
                 "name": name,
                 "location": "keyring + environment",
                 "env_var": env_var,
-                "masked_value": _mask_key(value)
+                "masked_value": _mask_key(value),
+                "newly_enabled_tools": newly_enabled_tools,
             }
         except Exception as e:
             # Keyring failed, but env var is set
+            newly_enabled_tools = _refresh_optional_tools_if_needed(agent)
             return {
                 "stored": True,
                 "name": name,
                 "location": "environment only (keyring failed)",
                 "env_var": env_var,
-                "warning": str(e)
+                "warning": str(e),
+                "newly_enabled_tools": newly_enabled_tools,
             }
     else:
+        newly_enabled_tools = _refresh_optional_tools_if_needed(agent)
         return {
             "stored": True,
             "name": name,
             "location": "environment only (keyring not installed)",
             "env_var": env_var,
-            "hint": "pip install keyring for persistent storage"
+            "hint": "pip install keyring for persistent storage",
+            "newly_enabled_tools": newly_enabled_tools,
         }
 
 
@@ -434,6 +468,8 @@ def update_config(key: str, value: str, agent=None) -> dict:
     is_sensitive = "KEY" in key_upper or "SECRET" in key_upper
     display_value = _mask_key(value) if is_sensitive else value
 
+    newly_enabled_tools = _refresh_optional_tools_if_needed(agent)
+
     return {
         "updated": True,
         "key": key_upper,
@@ -441,6 +477,7 @@ def update_config(key: str, value: str, agent=None) -> dict:
         "env_set": True,
         "config_updated": config_updated,
         "persisted_to_keyring": persisted,
+        "newly_enabled_tools": newly_enabled_tools,
     }
 
 
@@ -454,6 +491,22 @@ _KEYRING_KNOWN_KEYS = [
     "SENDBLUE_API_KEY",
     "SENDBLUE_API_SECRET",
     "COMPOSIO_API_KEY",
+    # Optional tools
+    "PEOPLEDATALABS_API_KEY",
+    "VOILANORBERT_API_KEY",
+    "HUNTER_API_KEY",
+    "EXA_API_KEY",
+    "HAPPENSTANCE_API_KEY",
+    "X_API_BEARER_TOKEN",
+    "RUNWAY_API_KEY",
+    "ELEVENLABS_API_KEY",
+    "VIDEODB_API_KEY",
+    "GODADDY_API_KEY",
+    "GODADDY_API_SECRET",
+    "SHOPIFY_ACCESS_TOKEN",
+    "SHOPIFY_STORE_DOMAIN",
+    "PRINTFUL_API_KEY",
+    "GITHUB_TOKEN",
 ]
 
 
