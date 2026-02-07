@@ -1,6 +1,10 @@
 # BabyAGI 3
 
-A minimal AI agent you configure once and then interact with entirely through natural language. Tell it to remember things, research topics, send emails, schedule tasks, and learn new skills — it handles the rest.
+A minimal AI agent you configure once, then run through natural language. Tell it to remember things, research topics, send emails, schedule tasks, and learn new skills.
+
+> ⚠️ **Cost warning**: BabyAGI can become expensive if you run many automations, background objectives, or premium models. Review model/config choices before long-running use: [Configuration](#configuration), [MODELS.md](MODELS.md), and [metrics/README.md](metrics/README.md).
+>
+> ⚠️ **Production warning**: If you deploy beyond localhost, read [Production hardening](#production-hardening) before exposing any API/webhook endpoints.
 
 > **Core philosophy**: Everything is a message in a conversation. The entire system is one loop: `input -> LLM -> action -> execute -> output`.
 
@@ -8,11 +12,12 @@ A minimal AI agent you configure once and then interact with entirely through na
 
 ```bash
 # Install
-git clone <repo-url> && cd babyagi_3
+git clone https://github.com/yoheinakajima/babyagi3 && cd babyagi3
 uv sync  # or: pip install -e .
 
-# Set your API key
+# Set one LLM API key (Anthropic OR OpenAI)
 export ANTHROPIC_API_KEY="sk-ant-..."
+# or: export OPENAI_API_KEY="sk-..."
 
 # Run
 python main.py
@@ -77,10 +82,15 @@ Changes take effect immediately — no restart needed.
 
 ### What gets set up automatically
 
-Once setup finishes, two recurring tasks are scheduled:
+Once setup finishes, these recurring automations are scheduled:
 
 - **Daily Stats Report** — compiles tool usage, memory extraction counts, LLM costs by model/source, scheduled task statuses, and errors from the last 24 hours. Emails the report to you.
 - **Daily Self-Improvement** — the agent picks one concrete action each day to become more helpful: create a new skill, set up a useful scheduled task, or ask you a question to better understand your needs.
+- **Check Email** (when AgentMail is configured) — checks inbox for new unread messages every 5 minutes and processes them.
+
+### Recommended during initialization
+
+- **Composio** is strongly recommended if you want broad app connectivity quickly. It unlocks 250+ integrations (Slack, GitHub, Notion, etc.) with minimal setup.
 
 ### Skipping the wizard
 
@@ -111,6 +121,16 @@ This re-launches the interactive setup wizard, then continues into the agent —
 ---
 
 ## What You Can Ask For
+
+### How you can talk to your agent
+
+You can interact through:
+
+- **CLI** (local terminal)
+- **Email** (AgentMail)
+- **SMS/iMessage** (SendBlue)
+
+By default, owner conversations are always handled. For others, behavior depends on your policy/preferences. SMS auto-replies are owner-focused by default (which also helps keep SendBlue usage in free-tier territory).
 
 Everything below is done through natural conversation. The agent decides which tools to use.
 
@@ -172,6 +192,8 @@ You: What's AAPL trading at?
 ```
 
 Dynamic tools are persisted to the database and survive restarts. Tools that need external packages are automatically sandboxed via E2B.
+
+Dynamic tools can also use other tools (tool composition), so you can build workflows like: "get domains from my Attio portfolio list (via Composio), then enrich and summarize them."
 
 ### Learn new skills
 
@@ -425,7 +447,7 @@ For detailed architecture diagrams (Mermaid), see [ARCHITECTURE.md](ARCHITECTURE
 ## Project Structure
 
 ```
-babyagi_3/
+babyagi3/
 ├── main.py              # Entry point (CLI, server, channel modes)
 ├── agent.py             # Core Agent class, Tool, Objective, main loop
 ├── config.py            # YAML config loader with env substitution
@@ -507,7 +529,15 @@ Optional (voice): `sounddevice`, `numpy`, `openai-whisper`, `pyttsx3`.
 
 ## License
 
-MIT
+MIT License. See [LICENSE](LICENSE).
+
+---
+
+## Contributing
+
+Contributions are very welcome — thank you. That said, maintainer bandwidth is limited, so response/review times can vary.
+
+Best place to reach the maintainer: [x.com/yoheinakajima](https://x.com/yoheinakajima) ([@yoheinakajima](https://x.com/yoheinakajima)).
 
 ---
 
@@ -552,4 +582,3 @@ Send either header on protected requests:
 - [ ] Use separate credentials for dev/staging/prod.
 - [ ] Scrub logs/monitoring for accidental secret leakage.
 - [ ] Prefer least-privilege credentials for third-party integrations.
-
