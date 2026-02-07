@@ -36,6 +36,15 @@ import logging
 import os
 import sys
 
+# Load .env file if present (before any config reads).
+# Supports .env, Replit secrets, or direct environment variables.
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    # python-dotenv not installed — not required, env vars / Replit secrets still work
+    pass
+
 from utils.console import console
 
 # Configure logging with immediate stderr output

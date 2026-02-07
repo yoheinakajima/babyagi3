@@ -65,23 +65,24 @@ def _check_secret(name: str) -> dict:
                 "env_var": env_name
             }
 
-    # Check keyring
+    # Check keyring - try the exact name first, then with _API_KEY suffix
     keyring = _get_keyring()
     if keyring:
-        try:
-            value = keyring.get_password(KEYRING_SERVICE, name_upper)
-            if value:
-                # Also set in environment for tool usage
-                os.environ[f"{name_upper}_API_KEY"] = value
-                return {
-                    "found": True,
-                    "name": name,
-                    "source": "keyring",
-                    "masked_value": _mask_key(value),
-                    "env_var": f"{name_upper}_API_KEY"
-                }
-        except Exception as e:
-            return {"error": f"Keyring error: {e}"}
+        for keyring_name in [name_upper, f"{name_upper}_API_KEY"]:
+            try:
+                value = keyring.get_password(KEYRING_SERVICE, keyring_name)
+                if value:
+                    # Also set in environment for tool usage
+                    os.environ[name_upper] = value
+                    return {
+                        "found": True,
+                        "name": name,
+                        "source": "keyring",
+                        "masked_value": _mask_key(value),
+                        "env_var": name_upper
+                    }
+            except Exception as e:
+                return {"error": f"Keyring error: {e}"}
 
     return {
         "found": False,
@@ -115,22 +116,39 @@ def store_secret(name: str, value: str) -> dict:
     1. Stored in keyring for persistence
     2. Set as environment variable for immediate use
 
+    IMPORTANT: Use the exact environment variable name expected by the system.
+    For example: "SENDBLUE_API_KEY", "AGENTMAIL_API_KEY", "SENDBLUE_PHONE_NUMBER",
+    "OWNER_PHONE". Do NOT use short names like "SENDBLUE" - use the full env var name.
+
     Args:
-        name: Name for the secret (e.g., "SERPAPI", "OPENAI")
+        name: Full environment variable name (e.g., "SENDBLUE_API_KEY", "AGENTMAIL_API_KEY", "OWNER_PHONE")
         value: The actual secret value to store
     """
     # Normalize name
     name_upper = name.upper().replace("-", "_")
 
+    # Determine the environment variable name.
+    # If the name already looks like a full env var (contains _API_KEY, _API_SECRET,
+    # _SECRET, _TOKEN, _PHONE, _NUMBER, _EMAIL, _ID, _URL, _NAME), use it as-is.
+    # Otherwise, append _API_KEY for backwards compatibility.
+    known_suffixes = (
+        "_API_KEY", "_API_SECRET", "_SECRET", "_TOKEN", "_KEY",
+        "_PHONE", "_PHONE_NUMBER", "_NUMBER", "_EMAIL", "_ID",
+        "_URL", "_NAME", "_BIO", "_GOAL", "_TIMEZONE",
+    )
+    if any(name_upper.endswith(suffix) for suffix in known_suffixes):
+        env_var = name_upper
+    else:
+        env_var = f"{name_upper}_API_KEY"
+
     # Set environment variable immediately
-    env_var = f"{name_upper}_API_KEY"
     os.environ[env_var] = value
 
-    # Store in keyring for persistence
+    # Store in keyring for persistence (using the full env var name as the key)
     keyring = _get_keyring()
     if keyring:
         try:
-            keyring.set_password(KEYRING_SERVICE, name_upper, value)
+            keyring.set_password(KEYRING_SERVICE, env_var, value)
             return {
                 "stored": True,
                 "name": name,
@@ -300,3 +318,123 @@ def check_required_secrets(required: list) -> dict:
         results["hint"] = "Use request_api_key() for each missing key"
 
     return results
+
+
+# =============================================================================
+# Configuration mapping: env var name -> config dict path
+# =============================================================================
+
+_CONFIG_FIELDS = {
+    # Owner fields
+    "OWNER_NAME": ("owner", "name"),
+    "OWNER_EMAIL": ("owner", "email"),
+    "OWNER_BIO": ("owner", "bio"),
+    "OWNER_GOAL": ("owner", "goal"),
+    "OWNER_PHONE": ("owner", "phone"),
+    "OWNER_TIMEZONE": ("owner", "timezone"),
+    # Agent fields
+    "AGENT_NAME": ("agent", "name"),
+    # Channel: SendBlue
+    "SENDBLUE_API_KEY": ("channels", "sendblue", "api_key"),
+    "SENDBLUE_API_SECRET": ("channels", "sendblue", "api_secret"),
+    "SENDBLUE_PHONE_NUMBER": ("channels", "sendblue", "from_number"),
+    # Channel: Email (AgentMail)
+    "AGENTMAIL_API_KEY": ("channels", "email", "api_key"),
+    "AGENTMAIL_INBOX_ID": ("channels", "email", "inbox_id"),
+}
+
+
+def _set_nested(d: dict, path: tuple, value):
+    """Set a value in a nested dict by key path, creating intermediates."""
+    for key in path[:-1]:
+        d = d.setdefault(key, {})
+    d[path[-1]] = value
+
+
+@tool
+def update_config(key: str, value: str, agent=None) -> dict:
+    """Update a BabyAGI configuration value at runtime.
+
+    Use this to change phone numbers, API keys, owner info, or channel settings
+    AFTER initialization. The change takes effect immediately — environment variable
+    is set, the in-memory config is updated, and sender/listener credentials are
+    refreshed so the new value is used on the next message.
+
+    Supported keys (use exact names):
+      Owner info:     OWNER_NAME, OWNER_EMAIL, OWNER_BIO, OWNER_GOAL, OWNER_PHONE, OWNER_TIMEZONE
+      Agent:          AGENT_NAME
+      SendBlue:       SENDBLUE_API_KEY, SENDBLUE_API_SECRET, SENDBLUE_PHONE_NUMBER
+      AgentMail:      AGENTMAIL_API_KEY, AGENTMAIL_INBOX_ID
+
+    For API keys and secrets, this also persists the value to keyring storage
+    (same as store_secret). For non-secret config (names, bios), it only sets
+    the environment variable and updates the running config.
+
+    Args:
+        key: Configuration key (e.g., "SENDBLUE_PHONE_NUMBER", "OWNER_PHONE")
+        value: The new value to set
+    """
+    key_upper = key.upper().replace("-", "_")
+
+    # Validate key
+    if key_upper not in _CONFIG_FIELDS:
+        return {
+            "error": f"Unknown config key: {key}",
+            "valid_keys": sorted(_CONFIG_FIELDS.keys()),
+        }
+
+    # 1. Set environment variable
+    os.environ[key_upper] = value
+
+    # 2. Update the running config dict (if agent is available)
+    config_updated = False
+    if agent and hasattr(agent, "config"):
+        path = _CONFIG_FIELDS[key_upper]
+        _set_nested(agent.config, path, value)
+        config_updated = True
+
+        # Also update owner.contacts mirror for phone/email
+        if key_upper == "OWNER_PHONE":
+            _set_nested(agent.config, ("owner", "contacts", "phone"), value)
+        elif key_upper == "OWNER_EMAIL":
+            _set_nested(agent.config, ("owner", "contacts", "email"), value)
+
+    # 3. Persist secrets to keyring (API keys, secrets, phone numbers — anything sensitive)
+    secret_keys = {
+        "SENDBLUE_API_KEY", "SENDBLUE_API_SECRET", "SENDBLUE_PHONE_NUMBER",
+        "AGENTMAIL_API_KEY", "AGENTMAIL_INBOX_ID",
+    }
+    persisted = False
+    if key_upper in secret_keys:
+        keyring = _get_keyring()
+        if keyring:
+            try:
+                keyring.set_password(KEYRING_SERVICE, key_upper, value)
+                persisted = True
+            except Exception as e:
+                logger.warning("Could not persist %s to keyring: %s", key_upper, e)
+
+    # 4. Invalidate cached credentials in senders so they re-read on next send
+    if agent and hasattr(agent, "senders"):
+        if key_upper.startswith("SENDBLUE") and "sendblue" in agent.senders:
+            sender = agent.senders["sendblue"]
+            sender._api_key = None
+            sender._api_secret = None
+            sender._from_number = None
+        if key_upper.startswith("AGENTMAIL") and "email" in agent.senders:
+            sender = agent.senders["email"]
+            sender._client = None
+            sender._inbox_id = None
+
+    # Determine if value should be masked in response
+    is_sensitive = "KEY" in key_upper or "SECRET" in key_upper
+    display_value = _mask_key(value) if is_sensitive else value
+
+    return {
+        "updated": True,
+        "key": key_upper,
+        "value": display_value,
+        "env_set": True,
+        "config_updated": config_updated,
+        "persisted_to_keyring": persisted,
+    }

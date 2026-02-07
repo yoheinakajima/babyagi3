@@ -497,6 +497,18 @@ Optional:
 IMPORTANT: If the user provides SendBlue API credentials, you MUST also ask for their SendBlue phone number.
 Without it, the agent cannot send any SMS messages. This is the phone number assigned by SendBlue
 (visible in their dashboard), NOT the owner's personal phone number.
+
+IMPORTANT: If the user provides their own phone number, also ask for the SendBlue phone number
+if SendBlue credentials are being set up. These are TWO DIFFERENT phone numbers:
+- Owner phone = the user's personal phone number (identifies their texts as owner)
+- SendBlue phone = the number assigned by SendBlue (the "from" number for sending texts)
+
+HOW API KEYS CAN BE PROVIDED (tell user if they ask):
+1. During this setup conversation (stored for current session)
+2. In a .env file in the project root (persists across restarts)
+3. As environment variables (e.g., export SENDBLUE_API_KEY="...")
+4. In Replit secrets (if running on Replit)
+5. After setup, by telling the agent: "set SENDBLUE_PHONE_NUMBER to +1555..."
 {existing_section}
 YOUR BEHAVIOR:
 - Start by briefly introducing yourself and explaining you'll help set up BabyAGI
@@ -520,8 +532,20 @@ These recurring tasks will be automatically scheduled:
 2. Daily Self-Improvement - the agent independently finds ways to be more helpful
 3. Email Check (every 5 min) - regularly checks the inbox for new messages (if email is configured)
 
-The user can always reconfigure later by editing config.yaml, setting environment variables,
-or re-running setup with: python main.py init"""
+The user can always reconfigure later by:
+- Telling the agent directly (e.g., "update my phone number to +15551234567" or "set the SendBlue phone number to +15551234567")
+- Editing config.yaml
+- Setting environment variables or Replit secrets
+- Adding values to a .env file in the project root
+- Re-running setup with: python main.py init
+
+IMPORTANT - HOW API KEYS ARE STORED:
+When the user provides API keys or phone numbers during this setup conversation, they are:
+1. Set as environment variables for the current session (immediate use)
+2. Written to the in-memory config (so all channels start correctly)
+They are NOT stored in keyring/"Replit secrets". If the user wants persistence across restarts,
+they should set these in their .env file, environment variables, or Replit secrets.
+After setup, the agent has an update_config tool that can update any of these values at runtime."""
 
 
 # =============================================================================
