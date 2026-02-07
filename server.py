@@ -108,11 +108,12 @@ async def api_auth_middleware(request: Request, call_next):
 
     expected_token = os.environ.get("BABYAGI_API_TOKEN", "").strip()
     if not expected_token:
-        logger.error("API auth enforced but BABYAGI_API_TOKEN is not set")
-        raise HTTPException(
-            status_code=503,
-            detail="API auth is enabled but BABYAGI_API_TOKEN is not configured",
+        logger.warning(
+            "API auth would be enforced but BABYAGI_API_TOKEN is not set — "
+            "allowing unauthenticated access. Set BABYAGI_API_TOKEN or run "
+            "'python main.py init' to generate one."
         )
+        return await call_next(request)
 
     auth_header = (request.headers.get("authorization") or "").strip()
     bearer_token = auth_header[7:].strip() if auth_header.lower().startswith("bearer ") else ""
