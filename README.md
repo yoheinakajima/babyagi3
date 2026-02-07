@@ -41,7 +41,32 @@ In every case, the agent starts normally after initialization — no restart req
 At minimum, the setup assistant needs your **name** and **email**. It will also walk you through setting up:
 
 - **Email channel ([AgentMail](https://agentmail.to))** — gives your agent its own email address for sending reports, handling signups, and email communication. Free tier available.
-- **SMS/iMessage channel ([SendBlue](https://sendblue.co))** — lets you text your agent from your phone. Needs an API key, secret, and your phone number.
+- **SMS/iMessage channel ([SendBlue](https://sendblue.co))** — lets you text your agent from your phone. Needs an API key, secret, and the SendBlue phone number from your dashboard. Also needs your personal phone number so the agent knows which texts are from you.
+
+### Providing API keys
+
+API keys and configuration values can be provided in any of these ways (checked in this order):
+
+1. **Environment variables** — `export SENDBLUE_API_KEY="..."` before running
+2. **`.env` file** — create a `.env` file in the project root with `KEY=value` lines (loaded automatically if `python-dotenv` is installed)
+3. **Replit secrets** — if running on Replit, add secrets in the Secrets panel (they appear as env vars)
+4. **During setup** — the initialization wizard stores values as env vars for the current session
+5. **After setup** — tell the agent directly: *"set the SendBlue phone number to +15551234567"* or *"update my phone number to +15559876543"*
+
+For persistence across restarts, use options 1-3. Values provided during setup (option 4) or via conversation (option 5) only last for the current process unless also set in `.env` or Replit secrets.
+
+### Updating configuration after setup
+
+You can change any configuration value at any time by telling the agent:
+
+```
+You: Update my phone number to +15559876543
+You: Set the SendBlue phone number to +15551234567
+You: Change the AgentMail API key to am_xxx
+You: Update my timezone to America/New_York
+```
+
+Changes take effect immediately — no restart needed.
 
 ### What gets set up automatically
 
@@ -252,6 +277,8 @@ verbose: light  # off, light (default), deep
 
 ### Environment Variables
 
+Set these as environment variables, in a `.env` file, or in Replit secrets.
+
 | Variable | Required | Purpose |
 |----------|----------|---------|
 | `ANTHROPIC_API_KEY` | Yes (or OPENAI_API_KEY) | LLM provider |
@@ -260,7 +287,8 @@ verbose: light  # off, light (default), deep
 | `OWNER_EMAIL` | For email | Your email for auto-replies |
 | `SENDBLUE_API_KEY` | For SMS | SendBlue SMS/iMessage |
 | `SENDBLUE_API_SECRET` | For SMS | SendBlue secret |
-| `OWNER_PHONE` | For SMS | Your phone number |
+| `SENDBLUE_PHONE_NUMBER` | For SMS | SendBlue "from" number (from your SendBlue dashboard) |
+| `OWNER_PHONE` | For SMS | Your personal phone number (identifies owner texts) |
 | `RECALL_API_KEY` | For meetings | Recall.ai meeting bot |
 | `BROWSER_USE_API_KEY` | For browsing | Web browser automation |
 | `E2B_API_KEY` | For sandboxing | Code execution sandbox |
