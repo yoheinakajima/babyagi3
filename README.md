@@ -45,15 +45,14 @@ At minimum, the setup assistant needs your **name** and **email**. It will also 
 
 ### Providing API keys
 
-API keys and configuration values can be provided in any of these ways (checked in this order):
+API keys can be provided in several ways. All options persist across restarts unless noted:
 
-1. **Environment variables** — `export SENDBLUE_API_KEY="..."` before running
-2. **`.env` file** — create a `.env` file in the project root with `KEY=value` lines (loaded automatically if `python-dotenv` is installed)
-3. **Replit secrets** — if running on Replit, add secrets in the Secrets panel (they appear as env vars)
-4. **During setup** — the initialization wizard stores values as env vars for the current session
-5. **After setup** — tell the agent directly: *"set the SendBlue phone number to +15551234567"* or *"update my phone number to +15559876543"*
-
-For persistence across restarts, use options 1-3. Values provided during setup (option 4) or via conversation (option 5) only last for the current process unless also set in `.env` or Replit secrets.
+1. **Secure prompt during setup (recommended)** — after the setup conversation, a secure prompt asks for each API key. Input is hidden (never echoed) and never sent to the AI. Keys are stored in the system keyring.
+2. **Environment variables** — `export SENDBLUE_API_KEY="..."` before running
+3. **`.env` file** — create a `.env` file in the project root with `KEY=value` lines (loaded automatically if `python-dotenv` is installed)
+4. **Replit secrets** — if running on Replit, add secrets in the Secrets panel (they appear as env vars)
+5. **During the setup chat** — you can paste keys directly in the conversation. They work and are persisted to keyring, but they do pass through the LLM API. The secure prompt (option 1) is preferred.
+6. **After setup** — tell the agent directly: *"set the SendBlue API key to ..."* or *"update my phone number to +15559876543"*. These are persisted to keyring.
 
 ### Updating configuration after setup
 

@@ -19,7 +19,7 @@ The tools subsystem provides all of BabyAGI's external capabilities. Tools are r
 | [`web.py`](web.py) | `web_search` (DuckDuckGo), `browse` (Browser Use Cloud), `fetch_url` |
 | [`email.py`](email.py) | `send_email`, `get_email_inbox` via AgentMail API |
 | [`sandbox.py`](sandbox.py) | `execute_code` — E2B cloud sandbox for safe code execution |
-| [`secrets.py`](secrets.py) | `get_secret`, `set_secret` — API key storage via system keyring |
+| [`secrets.py`](secrets.py) | `get_secret`, `store_secret`, `request_api_key`, `update_config` — API key storage via system keyring |
 | [`credentials.py`](credentials.py) | `store_credential`, `get_credential`, `list_credentials` — account/payment storage |
 | [`skills.py`](skills.py) | `learn_skill`, `acquire_skill`, `activate_skill`, `enable_composio` |
 | [`meeting.py`](meeting.py) | `join_meeting`, `meeting_status` — Recall.ai meeting transcription |
