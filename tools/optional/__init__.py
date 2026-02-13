@@ -10,6 +10,7 @@ import importlib
 import os
 
 _OPTIONAL_MODULES = {
+    "tools.optional.kamiyo": ["KAMIYO_ENABLED"],
     "tools.optional.peopledatalabs": ["PEOPLEDATALABS_API_KEY"],
     "tools.optional.voilanorbert": ["VOILANORBERT_API_KEY"],
     "tools.optional.hunter": ["HUNTER_API_KEY"],

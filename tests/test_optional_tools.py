@@ -28,6 +28,21 @@ def test_optional_tools_load_with_key(monkeypatch):
     assert after >= before
     assert any(t["name"] == "github_search_repositories" for t in _registered_tools)
 
+def test_optional_tools_load_with_kamiyo_enabled(monkeypatch):
+    import importlib
+    import tools.optional as opt
+
+    monkeypatch.setenv("KAMIYO_ENABLED", "1")
+    opt = importlib.reload(opt)
+
+    before = len(_registered_tools)
+    loaded = opt.load_optional_tools()
+    after = len(_registered_tools)
+
+    assert "tools.optional.kamiyo" in loaded
+    assert after >= before
+    assert any(t["name"] == "kamiyo_create_escrow_call" for t in _registered_tools)
+
 
 def test_optional_tools_can_load_later_after_key_is_added(monkeypatch):
     import importlib
