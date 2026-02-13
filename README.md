@@ -226,8 +226,9 @@ Requires `composio login` or `COMPOSIO_API_KEY`.
 
 ### Optional API tools (off by default)
 
-There is now a `tools/optional/` folder with additional API integrations that only load when their API key env vars are present.
+There is now a `tools/optional/` folder with additional integrations that only load when their required env vars are present.
 
+- `KAMIYO_ENABLED` (enables KAMIYO tools; defaults to `KAMIYO_MODE=mock` which makes no network calls)
 - `PEOPLEDATALABS_API_KEY`
 - `VOILANORBERT_API_KEY`
 - `HUNTER_API_KEY`
@@ -245,6 +246,12 @@ There is now a `tools/optional/` folder with additional API integrations that on
 If a key is missing, the related tool is ignored and not registered.
 
 > Note: these optional integrations are scaffolded against current public API docs and patterns, but not all endpoints have been thoroughly live-tested in this repo yet.
+
+KAMIYO includes a deterministic zero-network smoke test:
+
+```bash
+python scripts/kamiyo_smoke.py
+```
 
 ---
 
