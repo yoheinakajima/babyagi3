@@ -25,7 +25,7 @@ except ImportError:  # Local fallback for standalone testing
             return _decorate(fn)
         return _decorate
 
-    def tool_error(error: str, fix: str | None = None, **extras) -> dict:
+    def tool_error(error: str, fix: str = None, **extras) -> dict:
         payload = {"error": error}
         if fix:
             payload["fix"] = fix
@@ -110,13 +110,26 @@ def _http_call(method: str, path: str, payload: dict | None = None) -> dict:
         except Exception:
             raw = ""
 
+        details: Any = None
+        if raw:
+            try:
+                details = json.loads(raw)
+            except Exception:
+                details = raw[:2000]
+
+        fix = "Check backend auth, payload shape, and endpoint availability."
+        if status == 401:
+            fix = "Set KAMIYO_API_KEY to the Bearer token for the KAMIYO bridge (or disable auth on the bridge)."
+        elif status == 404:
+            fix = "Verify KAMIYO_BASE_URL points at a server that implements /babyagi/v1/* endpoints."
+
         return {
             "ok": False,
             "error": f"Backend rejected request ({status})",
             "code": "backend_http_error",
             "status_code": status,
-            "details": raw[:2000] if raw else None,
-            "fix": "Check backend auth, payload shape, and endpoint availability.",
+            "details": details,
+            "fix": fix,
         }
     except Exception as exc:
         return {
@@ -135,7 +148,7 @@ def kamiyo_create_escrow_call(
     transaction_id: str = "",
     timelock_seconds: int = 3600,
     idempotency_key: str = "",
-    metadata: dict | None = None,
+    metadata: dict = None,
 ) -> dict:
     """Create a KAMIYO escrow before calling a paid provider.
 
@@ -201,8 +214,8 @@ def kamiyo_execute_paid_call(
     escrow_id: str,
     url: str,
     method: str = "GET",
-    headers: dict | None = None,
-    body: dict | None = None,
+    headers: dict = None,
+    body: dict = None,
     timeout_ms: int = 10000,
 ) -> dict:
     """Execute a paid provider call under escrow.
@@ -270,9 +283,9 @@ def kamiyo_execute_paid_call(
 @tool(env=["KAMIYO_ENABLED"])
 def kamiyo_assess_quality(
     escrow_id: str,
-    response: dict | str,
-    expected_fields: list[str] | None = None,
-    max_latency_ms: int | None = None,
+    response: dict,
+    expected_fields: list[str] = None,
+    max_latency_ms: int = None,
     min_quality_score: int = 70,
 ) -> dict:
     """Assess response quality and return a deterministic quality score.
@@ -339,7 +352,7 @@ def kamiyo_assess_quality(
 def kamiyo_settle_or_dispute(
     escrow_id: str,
     quality_score: int,
-    evidence: dict | None = None,
+    evidence: dict = None,
     auto_dispute_threshold: int = 70,
     idempotency_key: str = "",
 ) -> dict:
