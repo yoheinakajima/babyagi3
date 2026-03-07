@@ -449,7 +449,12 @@ def log_message(memory, content: str, context: dict, direction: str = "inbound")
         conversation_id=context.get("conversation_id"),
         metadata={
             "sender": context.get("sender"),
+            "from": context.get("from") or context.get("sender"),
+            "to": context.get("to") or [],
+            "cc": context.get("cc") or [],
+            "owner_email": context.get("owner_email"),
             "subject": context.get("subject"),
+            "message_id": context.get("message_id"),
         },
     )
 
