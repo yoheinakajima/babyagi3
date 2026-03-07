@@ -19,9 +19,10 @@ from contextlib import asynccontextmanager
 from typing import Optional
 
 from fastapi import FastAPI, BackgroundTasks, Request, HTTPException, WebSocket, WebSocketDisconnect
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from agent import Agent, Objective
+from utils.email_workspace import WorkspacePanelCache
 from utils.console import console
 
 logger = logging.getLogger(__name__)
@@ -62,6 +63,7 @@ def _api_auth_enabled(request: Request) -> bool:
 
 agent = Agent()
 scheduler_task: asyncio.Task | None = None
+workspace_panel_cache = WorkspacePanelCache()
 
 
 def _register_server_senders():
@@ -176,6 +178,32 @@ class SendBlueWebhookPayload(BaseModel):
     group_id: Optional[str] = None
 
 
+class EmailWorkspacePanel(BaseModel):
+    """Frontend-friendly panel payload used by the email workspace page."""
+
+    status: str = "idle"
+    generated_at: str | None = None
+    person: dict | None = None
+    organizations: list[dict] = Field(default_factory=list)
+    summary: str | None = None
+    summary_status: str = "missing"
+    recent_interactions: list[dict] = Field(default_factory=list)
+    attio: dict | None = None
+    attio_status: str = "disabled"
+    sections: dict = Field(default_factory=dict)
+    errors: list[str] = Field(default_factory=list)
+
+
+class EmailWorkspaceResponse(BaseModel):
+    """Full-page email workspace response with immediate thread + async panel."""
+
+    thread_id: str
+    messages: list[dict]
+    panel_status: str
+    panel_preview: dict | None = None
+    panel: EmailWorkspacePanel | None = None
+
+
 # =============================================================================
 # Recall.ai Webhook Models
 # =============================================================================
@@ -278,6 +306,54 @@ async def clear_thread(thread_id: str):
     """Clear a thread's message history."""
     agent.clear_thread(thread_id)
     return {"cleared": thread_id}
+
+
+@app.get("/email-workspace/{thread_id}", response_model=EmailWorkspaceResponse)
+async def get_email_workspace(thread_id: str):
+    """Return email thread immediately and hydrate panel asynchronously."""
+    messages = agent.get_thread(thread_id)
+    workspace_panel_cache.ensure_background_refresh(agent, thread_id)
+
+    panel_data = workspace_panel_cache.get_full(thread_id)
+    panel_preview = workspace_panel_cache.get_preview(thread_id)
+    panel_status = workspace_panel_cache.status(thread_id)
+
+    return EmailWorkspaceResponse(
+        thread_id=thread_id,
+        messages=messages,
+        panel_status=panel_status,
+        panel_preview=panel_preview,
+        panel=EmailWorkspacePanel(**{k: v for k, v in panel_data.items() if not k.startswith("_")}) if panel_data else None,
+    )
+
+
+@app.get("/email-workspace/{thread_id}/panel")
+async def get_email_workspace_panel(thread_id: str):
+    """Poll endpoint for panel readiness and explicit panel schema."""
+    workspace_panel_cache.ensure_background_refresh(agent, thread_id)
+    panel_data = workspace_panel_cache.get_full(thread_id)
+
+    if panel_data is None:
+        return {
+            "status": workspace_panel_cache.status(thread_id),
+            "generated_at": None,
+            "person": None,
+            "organizations": [],
+            "summary": None,
+            "summary_status": "missing",
+            "recent_interactions": [],
+            "attio": None,
+            "attio_status": "disabled",
+            "sections": {},
+            "errors": [],
+            "panel_preview": workspace_panel_cache.get_preview(thread_id),
+        }
+
+    return {
+        **{k: v for k, v in panel_data.items() if not k.startswith("_")},
+        "status": workspace_panel_cache.status(thread_id),
+        "panel_preview": workspace_panel_cache.get_preview(thread_id),
+    }
 
 
 @app.get("/health")

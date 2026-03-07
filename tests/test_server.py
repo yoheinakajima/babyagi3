@@ -14,6 +14,8 @@ from server import (
     MessageResponse,
     ObjectiveResponse,
     SendBlueWebhookPayload,
+    EmailWorkspacePanel,
+    EmailWorkspaceResponse,
     _api_auth_enabled,
     _normalize_phone,
 )
@@ -68,6 +70,35 @@ class TestObjectiveResponse:
         )
         assert resp.id == "obj1"
         assert resp.status == "completed"
+
+
+class TestEmailWorkspacePanel:
+    def test_defaults(self):
+        panel = EmailWorkspacePanel()
+        assert panel.status == "idle"
+        assert panel.organizations == []
+        assert panel.summary_status == "missing"
+
+
+class TestEmailWorkspaceResponse:
+    def test_minimal(self):
+        payload = EmailWorkspaceResponse(
+            thread_id="email:1",
+            messages=[],
+            panel_status="loading",
+        )
+        assert payload.panel is None
+        assert payload.panel_status == "loading"
+
+    def test_with_panel_data(self):
+        panel = EmailWorkspacePanel(status="ready", summary="Known contact", summary_status="ready")
+        payload = EmailWorkspaceResponse(
+            thread_id="email:2",
+            messages=[{"role": "user", "content": "hi"}],
+            panel_status="ready",
+            panel=panel,
+        )
+        assert payload.panel.summary == "Known contact"
 
 
 class TestSendBlueWebhookPayload:

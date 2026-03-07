@@ -165,6 +165,7 @@ async def run_email_listener(agent, config: dict = None):
                 subject = getattr(msg, 'subject', '') or ''
 
                 # Read full message
+                full_msg = None
                 try:
                     full_msg = client.inboxes.messages.get(inbox_id=inbox_id, message_id=msg_id)
                     body = getattr(full_msg, 'body', None) or getattr(full_msg, 'text', '') or ''
@@ -183,14 +184,23 @@ async def run_email_listener(agent, config: dict = None):
                     # External emails get separate thread per sender
                     thread_id = f"external:{sender}"
 
+                # Structured participant metadata for downstream workspace resolution
+                to_list = getattr(full_msg, 'to', None) if full_msg else None
+                cc_list = getattr(full_msg, 'cc', None) if full_msg else None
+
                 # Build context
                 context = {
                     "channel": "email",
                     "is_owner": is_owner,
                     "sender": sender,
+                    "from": sender,
+                    "to": to_list or [],
+                    "cc": cc_list or [],
+                    "owner_email": owner_email,
                     "subject": subject,
                     "message_id": msg_id,
                     "reply_to": msg_id,
+                    "conversation_id": thread_id,
                 }
 
                 # Check if this is a meeting invite
